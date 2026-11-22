@@ -1,0 +1,30 @@
+services:
+  backend:
+    build: ./reactnms-backend
+    container_name: reactnms-backend
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - DATA_DIR=/app/data
+      - SNMP_HOST=${SNMP_HOST:-192.168.1.1}
+      - SNMP_COMMUNITY=${SNMP_COMMUNITY:-public}
+    volumes:
+      - discovery-data:/app/data
+    # Uncomment for direct SNMP access on Linux (recommended for home lab)
+    # network_mode: host
+    restart: unless-stopped
+
+  frontend:
+    build: ./reactnms
+    container_name: reactnms-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    environment:
+      - VITE_API_URL=http://localhost:3001
+    restart: unless-stopped
+
+volumes:
+  discovery-data:

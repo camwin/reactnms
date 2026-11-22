@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build outputs
+dist/
+build/
+*.log
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Runtime data (SQLite, discovery results, alerts)
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+discovery.json
+alerts.json
+traffic-history.json
+interface-selections.json
+
+# Docker
+.docker/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local overrides
+docker-compose.override.yml

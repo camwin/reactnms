@@ -1,0 +1,18 @@
+{
+  "name": "reactnms-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "net-snmp": "^3.15.2",
+    "node-cron": "^3.0.3",
+    "ip-cidr": "^3.1.0",
+    "better-sqlite3": "^11.6.0"
+  }
+}
