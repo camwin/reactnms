@@ -1,75 +1,117 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Bell, Activity, Server } from 'lucide-react';
-
-const API = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+import { Metric, Panel } from '@/components/nms/bits';
+import { fetchAlertRules, fetchDiscoveryResults, type AlertRule, type DiscoveredDevice } from '@/lib/api';
+import { formatAgo } from '@/lib/format';
 
 export default function Dashboard() {
-  const [devices, setDevices] = useState<any[]>([]);
-  const [rules, setRules] = useState<any[]>([]);
-  const [widgets, setWidgets] = useState<string[]>(['alerts', 'devices', 'top']);
+  const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
+  const [lastRun, setLastRun] = useState<string | null>(null);
+  const [rules, setRules] = useState<AlertRule[]>([]);
 
   useEffect(() => {
-    fetch(`${API}/api/discovery/results`).then((r) => r.json()).then((d) => setDevices(d.results || [])).catch(() => {});
-    fetch(`${API}/api/alerts/rules`).then((r) => r.json()).then(setRules).catch(() => {});
+    let cancel = false;
+    fetchDiscoveryResults()
+      .then((data) => {
+        if (cancel) return;
+        setDevices(data.results || []);
+        setLastRun(data.lastRun);
+      })
+      .catch(() => {
+        if (!cancel) setDevices([]);
+      });
+    fetchAlertRules()
+      .then((data) => {
+        if (!cancel) setRules(data);
+      })
+      .catch(() => {
+        if (!cancel) setRules([]);
+      });
+    return () => {
+      cancel = true;
+    };
   }, []);
 
-  function toggleWidget(id: string) {
-    setWidgets((w) => (w.includes(id) ? w.filter((x) => x !== id) : [...w, id]));
-  }
+  const enabled = rules.filter((rule) => rule.enabled !== false).length;
 
   return (
-    <div>
-      <div className="page-header">
-        <h1>Dashboard</h1>
-        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-          <label style={{ color: '#94a3b8' }}><input type="checkbox" checked={widgets.includes('alerts')} onChange={() => toggleWidget('alerts')} /> Alerts</label>
-          <label style={{ color: '#94a3b8' }}><input type="checkbox" checked={widgets.includes('devices')} onChange={() => toggleWidget('devices')} /> Devices</label>
-          <label style={{ color: '#94a3b8' }}><input type="checkbox" checked={widgets.includes('top')} onChange={() => toggleWidget('top')} /> Top interfaces</label>
-        </div>
+    <div className="flex flex-col gap-4">
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
+        <p className="mt-1 text-sm text-pretty text-muted">
+          {devices.length} discovered devices · {enabled} enabled alert {enabled === 1 ? 'rule' : 'rules'}
+        </p>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-        {widgets.includes('alerts') && (
-          <div className="card">
-            <h3><Bell size={18} /> Alerts</h3>
-            {rules.length === 0 ? (
-              <p style={{ color: '#94a3b8' }}>No rules. <Link to="/alerts" style={{ color: '#3b82f6' }}>Create one</Link></p>
-            ) : (
-              rules.slice(0, 5).map((r) => (
-                <div key={r.id} style={{ padding: '6px 0', borderBottom: '1px solid #334155' }}>
-                  <strong>{r.name}</strong>
-                  <div style={{ color: '#94a3b8', fontSize: '0.85rem' }}>{r.device} · {r.metric} {r.op} {r.threshold} {r.unit}</div>
-                </div>
-              ))
-            )}
-          </div>
-        )}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+        <Metric label="Devices" value={String(devices.length)} hint="From the last discovery scan" />
+        <Metric label="Alert rules" value={String(enabled)} hint={`${rules.length} defined`} />
+        <Metric label="Last discovery" value={formatAgo(lastRun)} hint={lastRun ? 'Scan finished' : 'No scan yet'} />
+      </div>
 
-        {widgets.includes('devices') && (
-          <div className="card">
-            <h3><Server size={18} /> Devices</h3>
-            {devices.length === 0 ? (
-              <p style={{ color: '#94a3b8' }}>None discovered. <Link to="/discovery" style={{ color: '#3b82f6' }}>Run a scan</Link></p>
-            ) : (
-              devices.slice(0, 6).map((d) => (
-                <div key={d.ip} style={{ padding: '6px 0', borderBottom: '1px solid #334155' }}>
-                  <Link to={`/devices/${encodeURIComponent(d.ip)}`} style={{ color: '#e2e8f0', textDecoration: 'none' }}>
-                    <strong>{d.sysName || d.ip}</strong> <span className="mono" style={{ color: '#94a3b8' }}>{d.ip}</span>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Panel
+          title="Devices"
+          action={
+            <Link to="/devices" className="text-sm text-accent">
+              All
+            </Link>
+          }
+        >
+          {devices.length === 0 ? (
+            <p className="px-4 py-6 text-sm text-muted">
+              None discovered.{' '}
+              <Link to="/discovery" className="text-accent">
+                Run a scan
+              </Link>
+            </p>
+          ) : (
+            <ul>
+              {devices.slice(0, 8).map((device) => (
+                <li key={device.ip} className="border-b border-line last:border-b-0">
+                  <Link to={`/devices/${encodeURIComponent(device.ip)}`} className="block px-4 py-3">
+                    <span className="block truncate font-mono text-sm">{device.sysName || device.ip}</span>
+                    <span className="mt-1 block truncate font-mono text-xs text-muted">{device.ip}</span>
                   </Link>
-                </div>
-              ))
-            )}
-          </div>
-        )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </Panel>
 
-        {widgets.includes('top') && (
-          <div className="card">
-            <h3><Activity size={18} /> Top interfaces</h3>
-            <p style={{ color: '#94a3b8' }}>Select interfaces on a device to start collecting rates.</p>
-            <Link to="/devices" style={{ color: '#3b82f6' }}>Go to devices</Link>
-          </div>
-        )}
+        <Panel
+          title="Alert rules"
+          action={
+            <Link to="/alerts" className="text-sm text-accent">
+              All
+            </Link>
+          }
+        >
+          {rules.length === 0 ? (
+            <p className="px-4 py-6 text-sm text-muted">
+              No rules.{' '}
+              <Link to="/alerts" className="text-accent">
+                Create one
+              </Link>
+            </p>
+          ) : (
+            <ul>
+              {rules.slice(0, 5).map((rule) => (
+                <li key={rule.id} className="border-b border-line px-4 py-3 last:border-b-0">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="truncate text-sm font-medium">{rule.name}</span>
+                    <span className={rule.enabled === false ? 'font-mono text-xs text-faint' : 'font-mono text-xs text-accent'}>
+                      {rule.enabled === false ? 'Off' : 'On'}
+                    </span>
+                  </div>
+                  <div className="mt-1 font-mono text-xs text-muted">
+                    {rule.device} · {rule.metric} {rule.op === 'gt' ? '>' : '<'} {rule.threshold} {rule.unit}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Panel>
       </div>
     </div>
   );

@@ -1,273 +1,319 @@
 import { useEffect, useState } from 'react';
-import { Radar, Play, Clock, Database, RefreshCw, Plus, Trash2 } from 'lucide-react';
-
-const API = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+import { Link } from 'react-router-dom';
+import { Play, Plus, Trash2 } from 'lucide-react';
+import { Panel } from '@/components/nms/bits';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
+import {
+  ApiError,
+  fetchDiscoveryConfig,
+  fetchDiscoveryResults,
+  fetchDiscoveryStatus,
+  importNetboxPrefixes,
+  saveDiscoveryConfig,
+  scanDiscovery,
+  type DiscoveredDevice,
+  type SnmpCredential,
+} from '@/lib/api';
+import { formatWhen } from '@/lib/format';
 
 export default function Discovery() {
-  const [results, setResults] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [results, setResults] = useState<DiscoveredDevice[]>([]);
+  const [running, setRunning] = useState(false);
+  const [watching, setWatching] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [status, setStatus] = useState('');
-
-  // Subnets
   const [subnets, setSubnets] = useState<string[]>([]);
   const [newSubnet, setNewSubnet] = useState('');
-
-  // SNMP
-  const [community, setCommunity] = useState('public');
-
-  // Schedule
+  const [credentials, setCredentials] = useState<SnmpCredential[]>([]);
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [cron, setCron] = useState('0 */6 * * *');
-
-  // NetBox integration
+  const [netboxReady, setNetboxReady] = useState(false);
   const [netboxUrl, setNetboxUrl] = useState('');
-  const [netboxToken, setNetboxToken] = useState('');
-  const [netboxTag, setNetboxTag] = useState('');
-  const [netboxRole, setNetboxRole] = useState('');
-  const [netboxType, setNetboxType] = useState('prefixes');
+  const [role, setRole] = useState('');
+  const [tag, setTag] = useState('');
 
   async function load() {
-    try {
-      const [cfgRes, resRes] = await Promise.all([
-        fetch(`${API}/api/discovery/config`),
-        fetch(`${API}/api/discovery/results`),
-      ]);
-      const cfg = await cfgRes.json();
-      const res = await resRes.json();
-
-      setSubnets(cfg.subnets || []);
-      setCommunity(cfg.community || 'public');
-      setScheduleEnabled(!!cfg.schedule?.enabled);
-      setCron(cfg.schedule?.cron || '0 */6 * * *');
-      setNetboxUrl(cfg.netbox?.url || '');
-      setNetboxToken(cfg.netbox?.token || '');
-      setNetboxTag(cfg.netbox?.tag || '');
-      setNetboxRole(cfg.netbox?.role || '');
-      setResults(res.results || []);
-    } catch (e: any) {
-      setStatus('Failed to load config: ' + e.message);
-    }
+    const [config, found] = await Promise.all([fetchDiscoveryConfig(), fetchDiscoveryResults()]);
+    setSubnets(config.subnets || []);
+    setCredentials(config.credentials || []);
+    setScheduleEnabled(!!config.schedule?.enabled);
+    setCron(config.schedule?.cron || '0 */6 * * *');
+    setNetboxReady(Boolean(config.netbox?.url && config.netbox?.token));
+    setNetboxUrl(config.netbox?.url || '');
+    setRole(config.netbox?.role || '');
+    setTag(config.netbox?.tag || '');
+    setResults(found.results || []);
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    let cancel = false;
+    load().catch((err: unknown) => {
+      if (!cancel) setStatus(err instanceof Error ? `Failed to load config: ${err.message}` : 'Failed to load config');
+    });
+    fetchDiscoveryStatus()
+      .then((next) => {
+        if (cancel) return;
+        setRunning(next.running);
+        if (next.running) setWatching(true);
+      })
+      .catch(() => {
+        /* an older backend has no status route; the scan button still works */
+      });
+    return () => {
+      cancel = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!watching) return;
+    let cancel = false;
+    const id = window.setInterval(() => {
+      fetchDiscoveryStatus()
+        .then(async (next) => {
+          if (cancel) return;
+          setRunning(next.running);
+          if (next.running) return;
+          setWatching(false);
+          const found = await fetchDiscoveryResults();
+          if (cancel) return;
+          setResults(found.results || []);
+          setStatus(next.error ? next.error : `Found ${found.count} devices`);
+        })
+        .catch(() => {
+          /* keep watching until the status route answers */
+        });
+    }, 2000);
+    return () => {
+      cancel = true;
+      window.clearInterval(id);
+    };
+  }, [watching]);
 
   async function saveConfig() {
     setStatus('Saving…');
     try {
-      await fetch(`${API}/api/discovery/config`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          subnets,
-          community,
-          schedule: { enabled: scheduleEnabled, cron },
-          netbox: {
-            url: netboxUrl,
-            token: netboxToken,
-            tag: netboxTag,
-            role: netboxRole,
-          },
-        }),
+      await saveDiscoveryConfig({
+        subnets,
+        schedule: { enabled: scheduleEnabled, cron },
       });
       setStatus('Saved');
-      setTimeout(() => setStatus(''), 2000);
-    } catch (e: any) {
-      setStatus('Save failed: ' + e.message);
+      window.setTimeout(() => setStatus(''), 2000);
+    } catch (err: unknown) {
+      setStatus(err instanceof Error ? `Save failed: ${err.message}` : 'Save failed');
     }
   }
 
   function addSubnet() {
-    const s = newSubnet.trim();
-    if (!s) return;
-    if (!subnets.includes(s)) setSubnets([...subnets, s]);
+    const subnet = newSubnet.trim();
+    if (!subnet) return;
+    if (!subnets.includes(subnet)) setSubnets([...subnets, subnet]);
     setNewSubnet('');
   }
 
-  function removeSubnet(s: string) {
-    setSubnets(subnets.filter((x) => x !== s));
-  }
-
   async function runScan() {
-    setLoading(true);
-    setStatus('Scanning…');
+    setStatus('Starting scan…');
     try {
-      const resp = await fetch(`${API}/api/discovery/scan`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subnets, community }),
-      });
-      const data = await resp.json();
-      setStatus(`Found ${data.count || 0} devices`);
-      await load();
-    } catch (e: any) {
-      setStatus('Scan failed: ' + e.message);
-    } finally {
-      setLoading(false);
+      const data = await scanDiscovery({ subnets });
+      if (data.started || data.running) {
+        setRunning(true);
+        setWatching(true);
+        setStatus('Scan started. Progress stays at the top of every page.');
+        return;
+      }
+      if (typeof data.count === 'number') {
+        setStatus(`Found ${data.count} devices`);
+        await load();
+      }
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 409) {
+        setRunning(true);
+        setWatching(true);
+      }
+      setStatus(err instanceof Error ? err.message : 'Scan failed');
     }
   }
 
-  async function importFromNetbox() {
-    if (!netboxUrl || !netboxToken) {
-      setStatus('NetBox URL and API token required');
-      return;
-    }
-    setLoading(true);
-    setStatus('Importing from NetBox…');
+  async function importPrefixes() {
+    setImporting(true);
+    setStatus('Importing prefixes…');
     try {
-      const resp = await fetch(`${API}/api/netbox/import`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: netboxUrl,
-          token: netboxToken,
-          tag: netboxTag || undefined,
-          role: netboxRole || undefined,
-          type: netboxType,
-        }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Import failed');
-
-      if (netboxType === 'prefixes' && data.items) {
-        const newOnes = data.items.map((i: any) => i.prefix).filter(Boolean);
-        setSubnets((prev) => [...new Set([...prev, ...newOnes])]);
-      }
-      setStatus(`Imported ${data.count} ${netboxType}`);
-    } catch (e: any) {
-      setStatus('NetBox import failed: ' + e.message);
+      const data = await importNetboxPrefixes({ role: role.trim(), tag: tag.trim() });
+      setSubnets(data.subnets || []);
+      if (data.role) setRole(data.role);
+      if (data.tag) setTag(data.tag);
+      const who = data.roleName ? ` for ${data.roleName}` : '';
+      const early = data.truncated ? ' The import stopped early. Narrow the filter and import again.' : '';
+      setStatus(`Imported ${data.count} prefixes (${data.added} new)${who}. About ${data.plannedHosts.toLocaleString()} hosts.${early}`);
+    } catch (err: unknown) {
+      setStatus(err instanceof Error ? err.message : 'Import failed');
     } finally {
-      setLoading(false);
+      setImporting(false);
     }
   }
 
   return (
-    <div className="discovery-page">
-      <div className="page-header">
-        <h1><Radar size={28} style={{ verticalAlign: 'middle', marginRight: 8 }} />Discovery</h1>
-        <p>Add subnets, schedule scans, or pull prefixes from NetBox</p>
-        {status && <div style={{ marginTop: 8, color: '#94a3b8' }}>{status}</div>}
+    <div className="flex flex-col gap-4">
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight">Discovery</h1>
+        <p className="mt-1 text-sm text-muted">
+          Scans use the SNMP credential bank. Live progress stays at the top of the page.
+        </p>
+        {status ? <p className="mt-2 text-sm text-muted">{status}</p> : null}
       </div>
 
-      {/* Subnets */}
-      <div className="card" style={{ marginBottom: 16 }}>
-        <h3>Subnets to Scan</h3>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-          <input
+      <Panel title="NetBox prefixes">
+        <div className="flex flex-col gap-3 px-4 py-4">
+          <p className="text-sm text-muted">
+            Imports active prefixes and adds them to the scan list. The role matches a NetBox name or slug, for example Management.
+          </p>
+          {netboxUrl ? <p className="truncate font-mono text-xs text-faint">{netboxUrl}</p> : null}
+          <div className="flex flex-wrap gap-2">
+            <Input
+              value={role}
+              onChange={(event) => setRole(event.target.value)}
+              placeholder="Role"
+              aria-label="NetBox role"
+              className="w-52"
+            />
+            <Input
+              value={tag}
+              onChange={(event) => setTag(event.target.value)}
+              placeholder="Tag (optional)"
+              aria-label="NetBox tag"
+              className="w-52"
+            />
+            <Button
+              tone="solid"
+              onClick={importPrefixes}
+              disabled={!netboxReady || importing || (!role.trim() && !tag.trim())}
+            >
+              {importing ? 'Importing…' : 'Import prefixes'}
+            </Button>
+          </div>
+          {!netboxReady ? (
+            <p className="text-sm text-muted">
+              Save a NetBox URL and token under{' '}
+              <Link to="/settings" className="text-accent">
+                Settings
+              </Link>{' '}
+              first.
+            </p>
+          ) : null}
+        </div>
+      </Panel>
+
+      <Panel title="Subnets to scan">
+        <div className="flex gap-2 px-4 pt-4">
+          <Input
             value={newSubnet}
-            onChange={(e) => setNewSubnet(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && addSubnet()}
+            onChange={(event) => setNewSubnet(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') addSubnet();
+            }}
             placeholder="192.168.1.0/24"
-            style={{ flex: 1 }}
+            aria-label="Subnet"
           />
-          <button className="btn-secondary" onClick={addSubnet}><Plus size={16} /> Add</button>
+          <Button tone="line" onClick={addSubnet}>
+            <Plus className="size-4" />
+            Add
+          </Button>
         </div>
         {subnets.length === 0 ? (
-          <p style={{ color: '#94a3b8' }}>No subnets added yet.</p>
+          <p className="px-4 py-4 text-sm text-muted">No subnets added yet.</p>
         ) : (
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-            {subnets.map((s) => (
-              <li key={s} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #334155' }}>
-                <code>{s}</code>
-                <button onClick={() => removeSubnet(s)} style={{ background: 'none', border: 'none', color: '#f87171', cursor: 'pointer' }}>
-                  <Trash2 size={16} />
+          <ul className="mt-3 max-h-72 overflow-auto">
+            {subnets.map((subnet) => (
+              <li key={subnet} className="flex items-center justify-between gap-3 border-t border-line px-4 py-2">
+                <code className="font-mono text-sm">{subnet}</code>
+                <button
+                  type="button"
+                  onClick={() => setSubnets(subnets.filter((item) => item !== subnet))}
+                  className="inline-flex size-11 items-center justify-center text-down"
+                  aria-label={`Remove ${subnet}`}
+                >
+                  <Trash2 className="size-4" />
                 </button>
               </li>
             ))}
           </ul>
         )}
-        <div style={{ display: 'flex', gap: 12, marginTop: 12, alignItems: 'center' }}>
-          <label>SNMP Community</label>
-          <input value={community} onChange={(e) => setCommunity(e.target.value)} style={{ width: 140 }} />
-          <button className="btn-primary" onClick={runScan} disabled={loading || subnets.length === 0}>
-            <Play size={16} /> {loading ? 'Scanning…' : 'Scan Now'}
-          </button>
-          <button className="btn-secondary" onClick={saveConfig}>Save</button>
+        <div className="flex flex-col gap-3 border-t border-line px-4 py-4">
+          <p className="text-sm text-muted">Credentials are tried in the order below. v3 uses SHA, and AES when a privacy key is set.</p>
+          {credentials.length === 0 ? (
+            <p className="text-sm text-muted">
+              No credentials saved.{' '}
+              <Link to="/settings" className="text-accent">
+                Add credentials
+              </Link>
+              . Until then a scan uses the saved v2c community.
+            </p>
+          ) : (
+            <ul className="flex flex-col gap-1">
+              {credentials.map((credential) => (
+                <li key={credential.id} className="font-mono text-sm">
+                  {credential.name} · {credential.version === '3' ? 'v3' : 'v2c'}
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <Button tone="solid" onClick={runScan} disabled={running || subnets.length === 0}>
+              <Play className="size-4" />
+              {running ? 'Scanning…' : 'Scan now'}
+            </Button>
+            <Button tone="line" onClick={saveConfig}>
+              Save
+            </Button>
+          </div>
         </div>
-      </div>
+      </Panel>
 
-      {/* Schedule */}
-      <div className="card" style={{ marginBottom: 16 }}>
-        <h3><Clock size={18} /> Schedule</h3>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <input type="checkbox" checked={scheduleEnabled} onChange={(e) => setScheduleEnabled(e.target.checked)} />
-          Enable scheduled discovery
-        </label>
-        <div style={{ marginTop: 8 }}>
-          <label>Cron expression</label>
-          <input value={cron} onChange={(e) => setCron(e.target.value)} style={{ width: 200, marginLeft: 8 }} placeholder="0 */6 * * *" />
-          <span style={{ marginLeft: 8, color: '#94a3b8', fontSize: '0.85rem' }}>e.g. every 6 hours</span>
+      <Panel title="Schedule">
+        <div className="flex flex-col gap-3 px-4 py-4">
+          <label className="flex min-h-11 items-center gap-3 text-sm">
+            <Switch checked={scheduleEnabled} onCheckedChange={setScheduleEnabled} aria-label="Enable scheduled discovery" />
+            Enable scheduled discovery
+          </label>
+          <div className="flex flex-wrap items-center gap-3">
+            <Label htmlFor="cron">Cron</Label>
+            <Input id="cron" value={cron} onChange={(event) => setCron(event.target.value)} className="w-48 font-mono" />
+            <span className="text-sm text-muted">Example: every 6 hours is 0 */6 * * *</span>
+          </div>
+          <div>
+            <Button tone="line" onClick={saveConfig}>
+              Update schedule
+            </Button>
+          </div>
         </div>
-        <button className="btn-secondary" style={{ marginTop: 8 }} onClick={saveConfig}>Update Schedule</button>
-      </div>
+      </Panel>
 
-      {/* NetBox Integration */}
-      <div className="card" style={{ marginBottom: 16 }}>
-        <h3><Database size={18} /> NetBox Integration</h3>
-        <p style={{ color: '#94a3b8', fontSize: '0.9rem', marginTop: 0 }}>
-          Pull prefixes (or devices) by tag and/or role. Prefixes are added to the scan list.
-        </p>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-          <div>
-            <label>NetBox URL</label>
-            <input value={netboxUrl} onChange={(e) => setNetboxUrl(e.target.value)} placeholder="https://netbox.example.com" style={{ width: '100%' }} />
-          </div>
-          <div>
-            <label>API Token</label>
-            <input type="password" value={netboxToken} onChange={(e) => setNetboxToken(e.target.value)} placeholder="Token" style={{ width: '100%' }} />
-          </div>
-          <div>
-            <label>Tag (optional)</label>
-            <input value={netboxTag} onChange={(e) => setNetboxTag(e.target.value)} placeholder="nms or management" style={{ width: '100%' }} />
-          </div>
-          <div>
-            <label>Role (optional)</label>
-            <input value={netboxRole} onChange={(e) => setNetboxRole(e.target.value)} placeholder="management or router" style={{ width: '100%' }} />
-          </div>
-        </div>
-        <div style={{ marginTop: 12, display: 'flex', gap: 12, alignItems: 'center' }}>
-          <select value={netboxType} onChange={(e) => setNetboxType(e.target.value)}>
-            <option value="prefixes">Prefixes</option>
-            <option value="devices">Devices</option>
-          </select>
-          <button className="btn-primary" onClick={importFromNetbox} disabled={loading}>
-            <RefreshCw size={16} /> Import from NetBox
-          </button>
-          <button className="btn-secondary" onClick={saveConfig}>Save NetBox Settings</button>
-        </div>
-      </div>
-
-      {/* Results */}
-      <div className="card">
-        <h3>Discovered Devices {results.length > 0 && `(${results.length})`}</h3>
+      <Panel title={results.length > 0 ? `Discovered devices (${results.length})` : 'Discovered devices'}>
         {results.length === 0 ? (
-          <p style={{ color: '#94a3b8' }}>No devices discovered yet. Add subnets and scan, or import from NetBox.</p>
+          <p className="px-4 py-6 text-sm text-muted">No devices discovered yet. Import prefixes or add a subnet, then scan.</p>
         ) : (
-          <div className="table-container">
-            <table className="devices-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>IP</th>
-                  <th>Description</th>
-                  <th>Subnet</th>
-                  <th>Discovered</th>
-                </tr>
-              </thead>
-              <tbody>
-                {results.map((d, i) => (
-                  <tr key={i}>
-                    <td><strong>{d.sysName || d.ip}</strong></td>
-                    <td className="mono">{d.ip}</td>
-                    <td style={{ fontSize: '0.85rem', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis' }}>{d.sysDescr}</td>
-                    <td>{d.subnet}</td>
-                    <td style={{ fontSize: '0.8rem', color: '#94a3b8' }}>{new Date(d.discoveredAt).toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ul>
+            {results.map((device) => (
+              <li key={`${device.ip}-${device.subnet || ''}`} className="border-b border-line last:border-b-0">
+                <Link to={`/devices/${encodeURIComponent(device.ip)}`} className="block px-4 py-3">
+                  <span className="flex items-center justify-between gap-3">
+                    <span className="truncate font-mono text-sm">{device.sysName || device.ip}</span>
+                    <span className="shrink-0 font-mono text-xs text-faint">{formatWhen(device.discoveredAt)}</span>
+                  </span>
+                  <span className="mt-1 block truncate text-sm text-muted">
+                    {device.ip}
+                    {device.subnet ? ` · ${device.subnet}` : ''}
+                    {device.credentialName ? ` · ${device.credentialName}` : ''}
+                    {device.sysDescr ? ` · ${device.sysDescr}` : ''}
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
         )}
-      </div>
+      </Panel>
     </div>
   );
 }

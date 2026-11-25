@@ -1,62 +1,39 @@
-# ReactNMS
+# ReactNMS frontend
 
-A modern, React-based Network Management System prototype.
+Operator UI for the Express SNMP backend in `../reactnms-backend`.
 
-## Features
+## Stack
 
-- **Dashboard** — KPI cards, traffic charts, device status overview, recent alerts
-- **Device Inventory** — Searchable table of network devices with status, metrics, and details
-- **Network Topology** — Interactive graph visualization powered by React Flow
-- **Alerts** — Prioritized alert list with severity filtering and acknowledgment
-- **Settings** — Basic configuration panels for polling and notifications
-- Dark professional theme with responsive layout
-- Mock data representing a typical enterprise network
-
-## Tech Stack
-
-- React 19 + TypeScript
-- Vite
+- React 19 + TypeScript + Vite
 - React Router
-- Recharts (charts)
-- @xyflow/react (topology)
-- Lucide React (icons)
+- Tailwind CSS 4, with shadcn-style primitives (Radix, class-variance-authority, tailwind-merge)
+- uPlot for per-interface rate graphs
+- IBM Plex Mono and Schibsted Grotesk
 
-## Getting Started
+The dark theme uses accent `#3ddec4`, raised surfaces, and the same density as the reactnms-2 prototype. Routes and API calls are the live app: discovery, devices, interface history, alert rules, NetBox settings, and the SNMP credential bank.
+
+## Scripts
 
 ```bash
-# Install dependencies
 npm install
-
-# Start development server
 npm run dev
-
-# Build for production
 npm run build
 ```
 
-Open http://localhost:5173
+Open http://localhost:5173. The dev server proxies `/api` to `http://localhost:3001`.
 
-## Project Structure
+## API base URL
+
+The client calls same-origin `/api` unless `VITE_API_URL` is set. Docker Compose serves the built app behind nginx, which already proxies `/api/` to the backend. Set `VITE_API_URL` only when the API is on another origin. That value is baked in at build time.
+
+## Layout
 
 ```
 src/
-├── components/Layout.tsx    # Sidebar + header shell
-├── data/mockData.ts         # Sample devices, alerts, topology
-├── pages/
-│   ├── Dashboard.tsx
-│   ├── Devices.tsx
-│   ├── Topology.tsx
-│   ├── Alerts.tsx
-│   └── Settings.tsx
-├── App.tsx
-└── App.css                  # Dark theme styles
+├── components/Layout.tsx    # Shell, sidebar, mobile nav
+├── components/nms/bits.tsx  # Metric, panel, status, utilization
+├── components/rate-chart.tsx
+├── components/ui/           # Button, input, select, switch, checkbox
+├── lib/api.ts               # Backend client
+└── pages/                   # Overview, devices, topology, discovery, alerts, settings
 ```
-
-## Customization
-
-Edit `src/data/mockData.ts` to change devices, alerts, or topology layout.  
-Status colors and theme variables are defined in `src/App.css`.
-
-## License
-
-MIT

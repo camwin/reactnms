@@ -1,237 +1,240 @@
-import { useEffect, useRef, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, Server, Activity, Settings, Database } from 'lucide-react';
-import uPlot from 'uplot';
-import 'uplot/dist/uPlot.min.css';
+import { useEffect, useState } from 'react';
+import { Link, useParams } from 'react-router-dom';
+import { ChevronLeft, Settings } from 'lucide-react';
+import { Metric, Panel, StatusPill } from '@/components/nms/bits';
+import { RateChart } from '@/components/rate-chart';
+import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Select } from '@/components/ui/select';
+import {
+  ApiError,
+  fetchDevice,
+  fetchSelections,
+  fetchStats,
+  fetchTraffic,
+  type DevicePoll,
+  type DeviceStats,
+  type TrafficPoint,
+  type TrafficRange,
+} from '@/lib/api';
+import { formatSnmpUptime } from '@/lib/format';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:3001';
-
-function toRateSeries(points: any[]) {
-  if (!points || points.length < 2) return { xs: [], ins: [], outs: [] };
-  const xs: number[] = [];
-  const ins: number[] = [];
-  const outs: number[] = [];
-  for (let i = 1; i < points.length; i++) {
-    const prev = points[i - 1];
-    const cur = points[i];
-    const dt = (cur.t - prev.t) / 1000;
-    if (dt <= 0) continue;
-    const inRate = Math.max(0, (cur.in - prev.in) * 8 / dt); // bits/sec
-    const outRate = Math.max(0, (cur.out - prev.out) * 8 / dt);
-    xs.push(cur.t / 1000);
-    ins.push(inRate);
-    outs.push(outRate);
-  }
-  return { xs, ins, outs };
-}
-
-function formatRate(bps: number) {
-  if (bps >= 1_000_000_000) return (bps / 1_000_000_000).toFixed(2) + ' Gbps';
-  if (bps >= 1_000_000) return (bps / 1_000_000).toFixed(2) + ' Mbps';
-  if (bps >= 1_000) return (bps / 1_000).toFixed(1) + ' Kbps';
-  return Math.round(bps) + ' bps';
-}
-
-function InterfaceChart({ idx, data }: { idx: string; data: any[] }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const plotRef = useRef<uPlot | null>(null);
-  const rates = toRateSeries(data);
-
-  useEffect(() => {
-    if (!ref.current || rates.xs.length < 2) return;
-    if (plotRef.current) plotRef.current.destroy();
-    plotRef.current = new uPlot({
-      width: ref.current.clientWidth || 700,
-      height: 180,
-      series: [
-        {},
-        { label: 'in', stroke: '#60a5fa', width: 2, value: (_u, v) => formatRate(v) },
-        { label: 'out', stroke: '#4ade80', width: 2, value: (_u, v) => formatRate(v) },
-      ],
-      scales: { x: { time: true }, y: { range: [0, null] } },
-      axes: [
-        { stroke: '#cbd5e1', grid: { stroke: '#334155' }, ticks: { stroke: '#64748b' } },
-        {
-          stroke: '#cbd5e1',
-          grid: { stroke: '#334155' },
-          ticks: { stroke: '#64748b' },
-          label: 'rate',
-          values: (_u, vals) => vals.map((v) => formatRate(v)),
-        },
-      ],
-    }, [rates.xs, rates.ins, rates.outs], ref.current);
-    return () => { plotRef.current?.destroy(); plotRef.current = null; };
-  }, [data, idx]);
-
-  const lastIn = rates.ins.length ? rates.ins[rates.ins.length - 1] : 0;
-  const lastOut = rates.outs.length ? rates.outs[rates.outs.length - 1] : 0;
-
-  return (
-    <div>
-      <div style={{ fontSize: '0.85rem', color: '#94a3b8', marginBottom: 4 }}>
-        Current: in {formatRate(lastIn)} · out {formatRate(lastOut)}
-      </div>
-      <div ref={ref} style={{ width: '100%' }} />
-    </div>
-  );
-}
+const RANGES: { value: TrafficRange; label: string }[] = [
+  { value: '1h', label: 'Last hour (raw)' },
+  { value: '6h', label: 'Last 6h (1m)' },
+  { value: '24h', label: 'Last 24h (1m)' },
+];
 
 export default function DeviceDetail() {
   const { ip } = useParams<{ ip: string }>();
-  const [device, setDevice] = useState<any>(null);
+  const [device, setDevice] = useState<DevicePoll | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
-  const [history, setHistory] = useState<Record<string, any[]>>({});
-  const [range, setRange] = useState('1h');
+  const [history, setHistory] = useState<Record<string, TrafficPoint[]>>({});
+  const [range, setRange] = useState<TrafficRange>('1h');
   const [realtime, setRealtime] = useState(true);
-  const [stats, setStats] = useState<any>(null);
+  const [stats, setStats] = useState<DeviceStats | null>(null);
+  const [chartNote, setChartNote] = useState('');
 
-  async function loadDevice() {
+  useEffect(() => {
     if (!ip) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 10000);
+    let cancel = false;
     setLoading(true);
     setError('');
+    setDevice(null);
+    fetchDevice(ip, controller.signal)
+      .then((data) => {
+        if (!cancel) setDevice(data);
+      })
+      .catch((err: unknown) => {
+        if (cancel) return;
+        if (err instanceof DOMException && err.name === 'AbortError') setError('Request timed out');
+        else if (err instanceof ApiError) setError(err.message);
+        else if (err instanceof Error && err.name === 'AbortError') setError('Request timed out');
+        else if (err instanceof Error) setError(err.message);
+        else setError('Could not load device');
+      })
+      .finally(() => {
+        window.clearTimeout(timer);
+        if (!cancel) setLoading(false);
+      });
+    return () => {
+      cancel = true;
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [ip]);
+
+  useEffect(() => {
+    if (!ip) return;
+    let cancel = false;
+    fetchSelections(ip)
+      .then((rows) => {
+        if (!cancel) setSelected((rows || []).map(String));
+      })
+      .catch(() => {
+        if (!cancel) setSelected([]);
+      });
+    fetchStats(ip)
+      .then((next) => {
+        if (!cancel) setStats(next);
+      })
+      .catch(() => {
+        if (!cancel) setStats(null);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [ip]);
+
+  const selectedKey = selected.join(',');
+
+  useEffect(() => {
+    if (!ip || !selectedKey || !realtime) return;
+    const host = ip;
+    const indexes = selectedKey.split(',');
+    let cancel = false;
+    async function load() {
+      try {
+        const series = await fetchTraffic(host, indexes, range);
+        if (!cancel) setHistory(series);
+      } catch {
+        /* keep the last series on a transient poll error */
+      }
+    }
+    load();
+    const id = window.setInterval(load, 5000);
+    return () => {
+      cancel = true;
+      window.clearInterval(id);
+    };
+  }, [ip, selectedKey, range, realtime]);
+
+  async function refresh() {
+    if (!ip || selected.length === 0) return;
     try {
-      const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), 10000);
-      const r = await fetch(`${API}/api/devices/${encodeURIComponent(ip)}`, { signal: controller.signal });
-      clearTimeout(t);
-      const data = await r.json();
-      if (!r.ok || data.error) setError(data.error || `HTTP ${r.status}`);
-      else setDevice(data);
-    } catch (e: any) {
-      setError(e.name === 'AbortError' ? 'Request timed out' : e.message);
-    } finally {
-      setLoading(false);
+      setHistory(await fetchTraffic(ip, selected, range));
+    } catch (err: unknown) {
+      setChartNote(err instanceof Error ? err.message : 'Refresh failed');
     }
   }
 
-  async function loadSelections() {
-    if (!ip) return;
-    const r = await fetch(`${API}/api/devices/${encodeURIComponent(ip)}/selections`);
-    setSelected(await r.json() || []);
-  }
+  if (loading) return <div className="px-1 py-6 text-sm text-muted">Loading device…</div>;
 
-  async function loadHistory() {
-    if (!ip || selected.length === 0) return;
-    const now = Date.now();
-    const from = range === '1h' ? now - 3600_000 : range === '6h' ? now - 6 * 3600_000 : now - 24 * 3600_000;
-    const res = range === '1h' ? 'raw' : '1m';
-    const r = await fetch(`${API}/api/devices/${encodeURIComponent(ip)}/traffic?if=${selected.join(',')}&from=${from}&to=${now}&res=${res}`);
-    setHistory(await r.json());
-  }
-
-  async function loadStats() {
-    if (!ip) return;
-    const r = await fetch(`${API}/api/devices/${encodeURIComponent(ip)}/stats`);
-    setStats(await r.json());
-  }
-
-  useEffect(() => { loadDevice(); loadSelections(); loadStats(); }, [ip]);
-
-  useEffect(() => {
-    if (selected.length === 0 || !realtime) return;
-    loadHistory();
-    const id = setInterval(loadHistory, 5000);
-    return () => clearInterval(id);
-  }, [ip, selected, range, realtime]);
-
-  if (loading) return <div style={{ padding: 24 }}>Loading device…</div>;
-  if (error || !device) {
+  if (error || !device || !ip) {
     return (
-      <div style={{ padding: 24 }}>
-        <Link to="/devices" style={{ color: '#94a3b8' }}><ArrowLeft size={16} /> Back</Link>
-        <h2 style={{ color: '#f87171' }}>Could not load device</h2>
-        <p>{error}</p>
+      <div className="flex flex-col gap-4">
+        <Link to="/devices" className="inline-flex min-h-11 items-center gap-1 text-sm text-muted">
+          <ChevronLeft className="size-4" aria-hidden />
+          Devices
+        </Link>
+        <div className="rounded-xl border border-down/40 bg-down/10 px-4 py-4">
+          <h1 className="text-xl font-semibold text-down">Could not load device</h1>
+          <p className="mt-2 text-sm text-down">{error || 'No response'}</p>
+        </div>
       </div>
     );
   }
 
-  const uptimeHours = Math.floor((device.sysUpTime || 0) / 100 / 3600);
-  const ifaceNames: Record<string, string> = {};
-  (device.interfaces || []).forEach((i: any) => {
-    const base = i.name || `if${i.index}`;
-    const desc = i.customDesc || '';
-    ifaceNames[String(i.index)] = desc ? `${base} — ${desc}` : base;
-  });
+  const names: Record<string, string> = {};
+  for (const iface of device.interfaces || []) {
+    const base = iface.name || `if${iface.index}`;
+    names[String(iface.index)] = iface.customDesc ? `${base} — ${iface.customDesc}` : base;
+  }
+
+  const facts = [
+    ['Description', device.sysDescr || '—'],
+    ['Location', device.sysLocation || '—'],
+    ['Contact', device.sysContact || '—'],
+    ['Management', device.ip],
+  ];
 
   return (
-    <div>
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Link to="/devices" style={{ color: '#94a3b8', textDecoration: 'none' }}><ArrowLeft size={16} /> Devices</Link>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Link to={`/devices/${encodeURIComponent(ip!)}/settings`} className="btn-secondary" style={{ textDecoration: 'none' }}>
-            <Settings size={16} /> Interface Settings
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Link to="/devices" className="inline-flex min-h-11 items-center gap-1 text-sm text-muted">
+          <ChevronLeft className="size-4" aria-hidden />
+          Devices
+        </Link>
+        <Button asChild tone="line">
+          <Link to={`/devices/${encodeURIComponent(ip)}/settings`}>
+            <Settings className="size-4" />
+            Interface settings
           </Link>
-        </div>
+        </Button>
       </div>
 
-      <div className="page-header">
-        <h1><Server size={28} style={{ verticalAlign: 'middle', marginRight: 8 }} />{device.sysName || device.ip}</h1>
-        <p className="mono">{device.ip}</p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="font-mono text-2xl font-semibold tracking-tight">{device.sysName || device.ip}</h1>
+          <p className="mt-1 font-mono text-sm text-muted">{device.ip}</p>
+          {device.credential ? <p className="mt-1 font-mono text-xs text-faint">{device.credential}</p> : null}
+        </div>
+        <StatusPill status="up" />
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-        <div className="card">
-          <h3>Overview</h3>
-          <table style={{ width: '100%' }}>
-            <tbody>
-              <tr><td style={{ color: '#94a3b8', width: 120 }}>Description</td><td>{device.sysDescr || '—'}</td></tr>
-              <tr><td style={{ color: '#94a3b8' }}>Location</td><td>{device.sysLocation || '—'}</td></tr>
-              <tr><td style={{ color: '#94a3b8' }}>Uptime</td><td>{uptimeHours}h</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div className="card">
-          <h3><Activity size={18} /> Status</h3>
-          <p style={{ color: '#34d399' }}>SNMP reachable</p>
-          <p style={{ color: '#94a3b8' }}>{selected.length} interfaces selected</p>
-          {stats && (
-            <div style={{ marginTop: 8, fontSize: '0.85rem', color: '#94a3b8' }}>
-              <Database size={14} style={{ verticalAlign: 'middle' }} />{' '}
-              {stats.rawSamples.toLocaleString()} raw samples · {(stats.dbSizeBytes / 1024).toFixed(1)} KB DB
-            </div>
-          )}
-        </div>
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Metric label="Uptime" value={formatSnmpUptime(device.sysUpTime)} />
+        <Metric label="Interfaces" value={String(device.interfaces?.length || 0)} />
+        <Metric label="Selected" value={String(selected.length)} hint="Polled into history" />
+        <Metric
+          label="Samples"
+          value={stats ? stats.rawSamples.toLocaleString() : '—'}
+          hint={stats ? `${(stats.dbSizeBytes / 1024).toFixed(1)} KB database` : 'History unavailable'}
+        />
       </div>
 
       {selected.length === 0 ? (
-        <div className="card">
-          <p style={{ color: '#94a3b8' }}>No interfaces selected. <Link to={`/devices/${ip}/settings`} style={{ color: '#3b82f6' }}>Configure</Link></p>
-        </div>
+        <p className="rounded-xl border border-line bg-surface px-4 py-6 text-sm text-muted">
+          No interfaces selected.{' '}
+          <Link to={`/devices/${encodeURIComponent(ip)}/settings`} className="text-accent">
+            Configure
+          </Link>
+        </p>
       ) : (
-        <div>
-          <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}>
-            <select value={range} onChange={(e) => setRange(e.target.value)}>
-              <option value="1h">Last hour (raw)</option>
-              <option value="6h">Last 6h (1m)</option>
-              <option value="24h">Last 24h (1m)</option>
-            </select>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <input type="checkbox" checked={realtime} onChange={(e) => setRealtime(e.target.checked)} />
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <Select ariaLabel="History range" value={range} onValueChange={(value) => setRange(value as TrafficRange)} options={RANGES} />
+            <label className="inline-flex min-h-11 items-center gap-2 text-sm">
+              <Checkbox checked={realtime} onCheckedChange={(checked) => setRealtime(checked === true)} />
               Realtime
             </label>
-            <button className="btn-secondary" onClick={loadHistory}>Refresh now</button>
+            <Button tone="line" onClick={refresh}>
+              Refresh now
+            </Button>
+            {chartNote ? <span className="text-sm text-down">{chartNote}</span> : null}
           </div>
-
-          {selected.map((idx) => {
-            const points = history[idx] || [];
+          {selected.map((index) => {
+            const points = history[index] || [];
             return (
-              <div key={idx} className="card" style={{ marginBottom: 12 }}>
-                <h3 style={{ marginTop: 0 }}>{ifaceNames[idx] || `Interface ${idx}`}</h3>
-                <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: 4 }}>
-                  {points.length} points
+              <Panel key={index} title={names[index] || `Interface ${index}`}>
+                <div className="px-4 py-3">
+                  <div className="mb-2 font-mono text-xs text-faint">{points.length} points</div>
+                  {points.length < 2 ? (
+                    <p className="text-sm text-muted">Collecting data… ({points.length}/2)</p>
+                  ) : (
+                    <RateChart points={points} />
+                  )}
                 </div>
-                {points.length < 2 ? (
-                  <p style={{ color: '#94a3b8' }}>Collecting data… ({points.length}/2)</p>
-                ) : (
-                  <InterfaceChart idx={idx} data={points} />
-                )}
-              </div>
+              </Panel>
             );
           })}
         </div>
       )}
+
+      <Panel title="Identity">
+        <dl className="grid gap-px bg-line sm:grid-cols-2">
+          {facts.map(([label, value]) => (
+            <div key={label} className="bg-surface px-4 py-3">
+              <dt className="font-mono text-xs uppercase tracking-widest text-faint">{label}</dt>
+              <dd className="mt-1 break-words font-mono text-sm">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      </Panel>
     </div>
   );
 }

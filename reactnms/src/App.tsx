@@ -13,7 +13,7 @@ const DeviceSettings = lazy(() => import('./pages/DeviceSettings'));
 const Settings = lazy(() => import('./pages/Settings'));
 
 function Loading() {
-  return <div style={{ padding: 40, color: '#94a3b8' }}>Loading…</div>;
+  return <div className="px-4 py-10 text-sm text-muted">Loading…</div>;
 }
 
 export default function App() {
