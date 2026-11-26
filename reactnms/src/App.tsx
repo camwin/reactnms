@@ -8,6 +8,8 @@ const Devices = lazy(() => import('./pages/Devices'));
 const Topology = lazy(() => import('./pages/Topology'));
 const Discovery = lazy(() => import('./pages/Discovery'));
 const Alerts = lazy(() => import('./pages/Alerts'));
+const AlertHistory = lazy(() => import('./pages/AlertHistory'));
+const Events = lazy(() => import('./pages/Events'));
 const DeviceDetail = lazy(() => import('./pages/DeviceDetail'));
 const DeviceSettings = lazy(() => import('./pages/DeviceSettings'));
 const Settings = lazy(() => import('./pages/Settings'));
@@ -26,6 +28,8 @@ export default function App() {
           <Route path="/topology" element={<Suspense fallback={<Loading />}><Topology /></Suspense>} />
           <Route path="/discovery" element={<Suspense fallback={<Loading />}><Discovery /></Suspense>} />
           <Route path="/alerts" element={<Suspense fallback={<Loading />}><Alerts /></Suspense>} />
+          <Route path="/alerts/history" element={<Suspense fallback={<Loading />}><AlertHistory /></Suspense>} />
+          <Route path="/events" element={<Suspense fallback={<Loading />}><Events /></Suspense>} />
           <Route path="/devices/:ip" element={<Suspense fallback={<Loading />}><DeviceDetail /></Suspense>} />
           <Route path="/devices/:ip/settings" element={<Suspense fallback={<Loading />}><DeviceSettings /></Suspense>} />
           <Route path="/settings" element={<Suspense fallback={<Loading />}><Settings /></Suspense>} />

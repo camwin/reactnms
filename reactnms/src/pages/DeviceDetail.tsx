@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ChevronLeft, Settings } from 'lucide-react';
-import { Metric, Panel, StatusPill } from '@/components/nms/bits';
+import { FilterChip, Metric, Panel, StatusPill } from '@/components/nms/bits';
 import { RateChart } from '@/components/rate-chart';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Select } from '@/components/ui/select';
 import {
   ApiError,
+  discoverDevice,
   fetchDevice,
   fetchSelections,
   fetchStats,
@@ -17,7 +18,8 @@ import {
   type TrafficPoint,
   type TrafficRange,
 } from '@/lib/api';
-import { formatSnmpUptime } from '@/lib/format';
+import { formatSnmpUptime, formatWhen } from '@/lib/format';
+import { DeviceSection } from '@/pages/device-sections';
 
 const RANGES: { value: TrafficRange; label: string }[] = [
   { value: '1h', label: 'Last hour (raw)' },
@@ -36,11 +38,30 @@ export default function DeviceDetail() {
   const [realtime, setRealtime] = useState(true);
   const [stats, setStats] = useState<DeviceStats | null>(null);
   const [chartNote, setChartNote] = useState('');
+  const [discovering, setDiscovering] = useState(false);
+  const [discoverNote, setDiscoverNote] = useState('');
+  const [reloadKey, setReloadKey] = useState(0);
+  const [tab, setTab] = useState('interfaces');
+
+  async function discover() {
+    if (!ip) return;
+    setDiscovering(true);
+    setDiscoverNote('');
+    try {
+      await discoverDevice(ip);
+      setReloadKey((value) => value + 1);
+      setDiscoverNote('Device rediscovered');
+    } catch (err: unknown) {
+      setDiscoverNote(err instanceof Error ? err.message : 'Discover failed');
+    } finally {
+      setDiscovering(false);
+    }
+  }
 
   useEffect(() => {
     if (!ip) return;
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 10000);
+    const timer = window.setTimeout(() => controller.abort(), 20000);
     let cancel = false;
     setLoading(true);
     setError('');
@@ -66,7 +87,7 @@ export default function DeviceDetail() {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [ip]);
+  }, [ip, reloadKey]);
 
   useEffect(() => {
     if (!ip) return;
@@ -88,7 +109,7 @@ export default function DeviceDetail() {
     return () => {
       cancel = true;
     };
-  }, [ip]);
+  }, [ip, reloadKey]);
 
   const selectedKey = selected.join(',');
 
@@ -135,6 +156,10 @@ export default function DeviceDetail() {
           <h1 className="text-xl font-semibold text-down">Could not load device</h1>
           <p className="mt-2 text-sm text-down">{error || 'No response'}</p>
         </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button tone="line" onClick={discover} disabled={discovering}>{discovering ? 'Discovering…' : 'Discover device'}</Button>
+          {discoverNote ? <span className="text-sm text-muted">{discoverNote}</span> : null}
+        </div>
       </div>
     );
   }
@@ -142,14 +167,29 @@ export default function DeviceDetail() {
   const names: Record<string, string> = {};
   for (const iface of device.interfaces || []) {
     const base = iface.name || `if${iface.index}`;
-    names[String(iface.index)] = iface.customDesc ? `${base} — ${iface.customDesc}` : base;
+    const alias = (iface.alias || '').trim();
+    names[String(iface.index)] = alias ? `${base} — ${alias}` : base;
   }
 
+  const tabs = [
+    { id: 'interfaces', label: 'Interfaces' },
+    ...(device.router ? [{ id: 'routing', label: 'Routing' }] : []),
+    { id: 'alerts', label: 'Alerts' },
+    { id: 'vlans', label: 'VLANs' },
+    { id: 'neighbors', label: 'Neighbors' },
+    { id: 'inventory', label: 'Inventory' },
+    { id: 'logs', label: 'Logs' },
+    ...(device.configEnabled ? [{ id: 'config', label: 'Config' }] : []),
+  ];
+  const currentTab = tabs.some((item) => item.id === tab) ? tab : 'interfaces';
+  const otherAddresses = (device.addresses || []).filter((address) => address && address !== device.ip);
   const facts = [
     ['Description', device.sysDescr || '—'],
     ['Location', device.sysLocation || '—'],
     ['Contact', device.sysContact || '—'],
     ['Management', device.ip],
+    ['Last discovered', device.discoveredAt ? formatWhen(device.discoveredAt) : '—'],
+    ...(otherAddresses.length ? [['Other addresses', otherAddresses.join(', ')]] : []),
   ];
 
   return (
@@ -159,13 +199,17 @@ export default function DeviceDetail() {
           <ChevronLeft className="size-4" aria-hidden />
           Devices
         </Link>
-        <Button asChild tone="line">
-          <Link to={`/devices/${encodeURIComponent(ip)}/settings`}>
-            <Settings className="size-4" />
-            Interface settings
-          </Link>
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button tone="line" onClick={discover} disabled={discovering}>{discovering ? 'Discovering…' : 'Discover device'}</Button>
+          <Button asChild tone="line">
+            <Link to={`/devices/${encodeURIComponent(ip)}/settings`}>
+              <Settings className="size-4" />
+              Device settings
+            </Link>
+          </Button>
+        </div>
       </div>
+      {discoverNote ? <p className="text-sm text-muted">{discoverNote}</p> : null}
 
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
@@ -187,7 +231,26 @@ export default function DeviceDetail() {
         />
       </div>
 
-      {selected.length === 0 ? (
+      <Panel title="Identity">
+        <dl className="grid gap-px bg-line sm:grid-cols-2">
+          {facts.map(([label, value]) => (
+            <div key={label} className="bg-surface px-4 py-3">
+              <dt className="font-mono text-xs uppercase tracking-widest text-faint">{label}</dt>
+              <dd className="mt-1 break-words font-mono text-sm">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      </Panel>
+
+      <div className="flex gap-2 overflow-x-auto">
+        {tabs.map((item) => (
+          <FilterChip key={item.id} active={currentTab === item.id} onClick={() => setTab(item.id)}>
+            {item.label}
+          </FilterChip>
+        ))}
+      </div>
+
+      {currentTab !== 'interfaces' ? <DeviceSection ip={ip} tab={currentTab} /> : selected.length === 0 ? (
         <p className="rounded-xl border border-line bg-surface px-4 py-6 text-sm text-muted">
           No interfaces selected.{' '}
           <Link to={`/devices/${encodeURIComponent(ip)}/settings`} className="text-accent">
@@ -224,17 +287,6 @@ export default function DeviceDetail() {
           })}
         </div>
       )}
-
-      <Panel title="Identity">
-        <dl className="grid gap-px bg-line sm:grid-cols-2">
-          {facts.map(([label, value]) => (
-            <div key={label} className="bg-surface px-4 py-3">
-              <dt className="font-mono text-xs uppercase tracking-widest text-faint">{label}</dt>
-              <dd className="mt-1 break-words font-mono text-sm">{value}</dd>
-            </div>
-          ))}
-        </dl>
-      </Panel>
     </div>
   );
 }

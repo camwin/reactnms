@@ -1,6 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { fetchDiscoveryResults, type DiscoveredDevice } from '@/lib/api';
+import { Button } from '@/components/ui/button';
+import { Select } from '@/components/ui/select';
+import { fetchTopology, saveTopologyDefault, scanTopology, type DiscoveredDevice, type TopologyLink, type TopologyView } from '@/lib/api';
+import { coreView } from '@/lib/core-view';
+import { formatAgo } from '@/lib/format';
 import { cn } from '@/lib/cn';
 
 function shortName(device: DiscoveredDevice) {
@@ -8,18 +12,7 @@ function shortName(device: DiscoveredDevice) {
   return raw.length > 16 ? `${raw.slice(0, 15)}…` : raw;
 }
 
-function layoutMap(devices: DiscoveredDevice[]) {
-  const groups = new Map<string, DiscoveredDevice[]>();
-  for (const device of devices) {
-    const key = device.subnet || 'Discovered';
-    const list = groups.get(key) || [];
-    list.push(device);
-    groups.set(key, list);
-  }
-  for (const list of groups.values()) {
-    list.sort((a, b) => (a.sysName || a.ip).localeCompare(b.sysName || b.ip));
-  }
-
+function layoutMap(view: TopologyView) {
   const colW = 230;
   const rowH = 76;
   const padX = 36;
@@ -27,16 +20,17 @@ function layoutMap(devices: DiscoveredDevice[]) {
   const gap = 20;
   let width = 760;
   let cursor = 16;
-  const frames: { subnet: string; x: number; y: number; w: number; h: number }[] = [];
+  const frames: { site: string; x: number; y: number; w: number; h: number }[] = [];
   const nodes: { device: DiscoveredDevice; x: number; y: number; label: string }[] = [];
 
-  for (const [subnet, list] of groups) {
+  for (const site of view.sites) {
+    const list = site.devices;
     const cols = Math.min(4, Math.max(1, list.length));
     const rows = Math.ceil(list.length / cols);
     const w = Math.max(320, padX * 2 + cols * colW);
     const h = padTop + rows * rowH + 16;
     width = Math.max(width, w + 32);
-    frames.push({ subnet, x: 16, y: cursor, w, h });
+    frames.push({ site: site.name, x: 16, y: cursor, w, h });
     list.forEach((device, index) => {
       const col = index % cols;
       const row = Math.floor(index / cols);
@@ -50,42 +44,115 @@ function layoutMap(devices: DiscoveredDevice[]) {
     cursor += h + gap;
   }
 
-  return { frames, nodes, width, height: Math.max(240, cursor) };
+  const at = new Map(nodes.map((node) => [node.device.ip, node]));
+  const lines = view.links.flatMap((link) => {
+    const from = at.get(link.a);
+    const to = at.get(link.b);
+    if (!from || !to) return [];
+    return [{ ...link, x1: from.x, y1: from.y, x2: to.x, y2: to.y }];
+  });
+
+  return { frames, nodes, lines, width, height: Math.max(240, cursor) };
 }
 
+const ALL = '__all__';
+
 export default function Topology() {
-  const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
+  const [view, setView] = useState<TopologyView>({ sites: [], links: [], scanning: false, scanned: 0, total: 0, updatedAt: null, error: null, defaultSite: '', core: '' });
   const [selected, setSelected] = useState<string | null>(null);
+  const [site, setSite] = useState(ALL);
+  const [note, setNote] = useState('');
+  const appliedDefault = useRef(false);
 
   useEffect(() => {
     let cancel = false;
     async function pull() {
       try {
-        const data = await fetchDiscoveryResults();
-        if (!cancel) setDevices(data.results || []);
+        const data = await fetchTopology();
+        if (cancel) return;
+        setView(data);
+        setNote('');
+        if (!appliedDefault.current) {
+          appliedDefault.current = true;
+          const core = data.core || data.defaultSite || '';
+          if (core && data.sites.some((item) => item.name === core)) setSite(core);
+        }
       } catch {
-        if (!cancel) setDevices([]);
+        if (!cancel) setNote('Could not load topology');
       }
     }
     pull();
-    const id = window.setInterval(pull, 5000);
+    const id = window.setInterval(pull, view.scanning ? 3000 : 15000);
     return () => {
       cancel = true;
       window.clearInterval(id);
     };
-  }, []);
+  }, [view.scanning]);
 
-  const map = useMemo(() => layoutMap(devices), [devices]);
+  const siteValue = site !== ALL && view.sites.some((item) => item.name === site) ? site : ALL;
+  const coreName = view.core || view.defaultSite || '';
+  const shown = useMemo(() => {
+    if (siteValue === ALL) return { ...view, note: '' };
+    const next = coreView(view.sites, view.links, siteValue, coreName);
+    return { ...view, sites: next.sites, links: next.links, note: next.note };
+  }, [view, siteValue, coreName]);
+  const devices = shown.sites.flatMap((item) => item.devices);
+  const map = useMemo(() => layoutMap(shown), [shown]);
   const current = devices.find((device) => device.ip === selected) || null;
+  const neighbors = shown.links.filter((link) => link.a === selected || link.b === selected);
 
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Topology</h1>
-        <p className="mt-1 text-sm text-muted">
-          Devices from the last discovery, grouped by prefix. Adjacencies are not polled yet.
-        </p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Topology</h1>
+          <p className="mt-1 text-sm text-muted">
+            Devices grouped by SNMP location. The core site shows only itself. Every other site shows the shortest neighbor path back to the core. Links come from CDP, and from LLDP only when a device has no CDP neighbors.
+            {view.updatedAt ? ` Last read ${formatAgo(view.updatedAt)}.` : ''}
+            {view.scanning ? ` Reading neighbors ${view.scanned}/${view.total}.` : ''}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            ariaLabel="Site"
+            value={siteValue}
+            onValueChange={setSite}
+            options={[{ value: ALL, label: 'All sites' }, ...view.sites.map((item) => ({ value: item.name, label: item.name }))]}
+          />
+          {siteValue !== ALL ? (
+            <Button
+              tone="line"
+              disabled={coreName === siteValue}
+              onClick={() => {
+                saveTopologyDefault(siteValue).then(setView).catch((err: unknown) => setNote(err instanceof Error ? err.message : 'Could not save the core site'));
+              }}
+            >
+              {coreName === siteValue ? 'Core' : 'Make core'}
+            </Button>
+          ) : null}
+          {coreName ? (
+            <Button
+              tone="ghost"
+              onClick={() => {
+                saveTopologyDefault('').then(setView).catch((err: unknown) => setNote(err instanceof Error ? err.message : 'Could not clear the core site'));
+              }}
+            >
+              Clear core
+            </Button>
+          ) : null}
+          <Button
+            tone="line"
+            onClick={() => {
+              setNote('');
+              scanTopology().then(setView).catch((err: unknown) => setNote(err instanceof Error ? err.message : 'Scan failed'));
+            }}
+          >
+            {view.scanning ? 'Reading neighbors' : 'Rescan neighbors'}
+          </Button>
+        </div>
       </div>
+      {shown.note ? <p className="text-sm text-muted">{shown.note}</p> : null}
+      {note || view.error ? <p className="text-sm text-down">{note || view.error}</p> : null}
 
       {devices.length === 0 ? (
         <p className="rounded-xl border border-line bg-surface px-4 py-8 text-sm text-muted">
@@ -101,22 +168,26 @@ export default function Topology() {
               viewBox={`0 0 ${map.width} ${map.height}`}
               className="h-auto w-full min-w-[720px]"
               role="group"
-              aria-label="Discovered devices"
+              aria-label="Sites and neighbor links"
             >
               {map.frames.map((frame) => (
-                <g key={frame.subnet}>
-                  <rect
-                    x={frame.x}
-                    y={frame.y}
-                    width={frame.w}
-                    height={frame.h}
-                    rx={12}
-                    className="fill-bg stroke-line"
-                  />
+                <g key={frame.site}>
+                  <rect x={frame.x} y={frame.y} width={frame.w} height={frame.h} rx={12} className="fill-bg stroke-line" />
                   <text x={frame.x + 16} y={frame.y + 26} className="fill-faint font-mono" fontSize="13">
-                    {frame.subnet}
+                    {frame.site}
                   </text>
                 </g>
+              ))}
+              {map.lines.map((line) => (
+                <line
+                  key={`${line.a}|${line.b}`}
+                  x1={line.x1}
+                  y1={line.y1}
+                  x2={line.x2}
+                  y2={line.y2}
+                  className={line.protocol === 'cdp' ? 'stroke-accent' : 'stroke-warn'}
+                  strokeWidth={selected && (line.a === selected || line.b === selected) ? 3 : 1.5}
+                />
               ))}
               {map.nodes.map((node) => {
                 const on = selected === node.device.ip;
@@ -137,13 +208,7 @@ export default function Topology() {
                       }
                     }}
                   >
-                    <circle
-                      cx={node.x}
-                      cy={node.y}
-                      r={on ? 26 : 20}
-                      className={cn('fill-raised stroke-accent', on && 'stroke-[4]')}
-                      strokeWidth={on ? 4 : 2.5}
-                    />
+                    <circle cx={node.x} cy={node.y} r={on ? 26 : 20} className={cn('fill-raised stroke-accent', on && 'stroke-[4]')} strokeWidth={on ? 4 : 2.5} />
                     <circle cx={node.x} cy={node.y} r={4.5} className="fill-accent" />
                     <rect x={node.x + 24} y={node.y - 12} width={labelWidth} height={24} rx={5} className="fill-raised" />
                     <text x={node.x + 32} y={node.y + 5} className="fill-fg font-mono" fontSize="13">
@@ -154,7 +219,11 @@ export default function Topology() {
               })}
             </svg>
           </div>
-          <div className="border-t border-line px-4 py-3 font-mono text-xs text-accent">Discovered</div>
+          <div className="border-t border-line px-4 py-3 font-mono text-xs text-muted">
+            <span className="text-accent">CDP</span>
+            <span> · </span>
+            <span className="text-warn">LLDP</span>
+          </div>
         </div>
       )}
 
@@ -164,10 +233,18 @@ export default function Topology() {
             <h2 className="font-mono text-lg font-semibold">{current.sysName || current.ip}</h2>
             <p className="font-mono text-sm text-muted">
               {current.ip}
-              {current.subnet ? ` · ${current.subnet}` : ''}
-              {current.credentialName ? ` · ${current.credentialName}` : ''}
+              {current.sysLocation ? ` · ${current.sysLocation}` : ' · No location'}
             </p>
             {current.sysDescr ? <p className="text-sm text-muted">{current.sysDescr}</p> : null}
+            {neighbors.length ? (
+              <ul className="text-sm">
+                {neighbors.map((link) => (
+                  <Neighbor key={`${link.a}|${link.b}`} link={link} self={current.ip} devices={devices} />
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-muted">No CDP or LLDP neighbor in the last read.</p>
+            )}
             <Link to={`/devices/${encodeURIComponent(current.ip)}`} className="inline-flex min-h-11 items-center text-sm text-accent">
               Open device
             </Link>
@@ -177,5 +254,18 @@ export default function Topology() {
         )}
       </section>
     </div>
+  );
+}
+
+function Neighbor({ link, self, devices }: { link: TopologyLink; self: string; devices: DiscoveredDevice[] }) {
+  const otherIp = link.a === self ? link.b : link.a;
+  const other = devices.find((device) => device.ip === otherIp);
+  const port = link.a === self ? link.aPort : link.bPort;
+  return (
+    <li className="border-b border-line py-2 last:border-b-0">
+      <span className="font-mono uppercase text-xs text-faint">{link.protocol}</span>{' '}
+      {other?.sysName || otherIp}
+      {port ? ` via ${port}` : ''}
+    </li>
   );
 }

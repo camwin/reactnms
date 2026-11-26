@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Play, Plus, Trash2 } from 'lucide-react';
 import { Panel } from '@/components/nms/bits';
+import { NetboxChoiceField } from '@/components/nms/netbox-fields';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -9,18 +10,16 @@ import { Switch } from '@/components/ui/switch';
 import {
   ApiError,
   fetchDiscoveryConfig,
-  fetchDiscoveryResults,
   fetchDiscoveryStatus,
+  fetchNetboxOptions,
   importNetboxPrefixes,
   saveDiscoveryConfig,
   scanDiscovery,
-  type DiscoveredDevice,
+  type NetboxChoice,
   type SnmpCredential,
 } from '@/lib/api';
-import { formatWhen } from '@/lib/format';
 
 export default function Discovery() {
-  const [results, setResults] = useState<DiscoveredDevice[]>([]);
   const [running, setRunning] = useState(false);
   const [watching, setWatching] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -32,20 +31,34 @@ export default function Discovery() {
   const [cron, setCron] = useState('0 */6 * * *');
   const [netboxReady, setNetboxReady] = useState(false);
   const [netboxUrl, setNetboxUrl] = useState('');
+  const [region, setRegion] = useState('');
   const [role, setRole] = useState('');
   const [tag, setTag] = useState('');
+  const [regions, setRegions] = useState<NetboxChoice[]>([]);
+  const [roles, setRoles] = useState<NetboxChoice[]>([]);
+  const [tags, setTags] = useState<NetboxChoice[]>([]);
 
   async function load() {
-    const [config, found] = await Promise.all([fetchDiscoveryConfig(), fetchDiscoveryResults()]);
+    const config = await fetchDiscoveryConfig();
     setSubnets(config.subnets || []);
     setCredentials(config.credentials || []);
     setScheduleEnabled(!!config.schedule?.enabled);
     setCron(config.schedule?.cron || '0 */6 * * *');
-    setNetboxReady(Boolean(config.netbox?.url && config.netbox?.token));
+    const ready = Boolean(config.netbox?.url && config.netbox?.token);
+    setNetboxReady(ready);
     setNetboxUrl(config.netbox?.url || '');
+    setRegion(config.netbox?.region || '');
     setRole(config.netbox?.role || '');
     setTag(config.netbox?.tag || '');
-    setResults(found.results || []);
+    if (!ready) return;
+    try {
+      const options = await fetchNetboxOptions();
+      setRegions(options.regions);
+      setRoles(options.roles);
+      setTags(options.tags);
+    } catch {
+      /* the saved slugs still work if the catalog cannot be loaded */
+    }
   }
 
   useEffect(() => {
@@ -77,10 +90,7 @@ export default function Discovery() {
           setRunning(next.running);
           if (next.running) return;
           setWatching(false);
-          const found = await fetchDiscoveryResults();
-          if (cancel) return;
-          setResults(found.results || []);
-          setStatus(next.error ? next.error : `Found ${found.count} devices`);
+          setStatus(next.error ? next.error : `Found ${next.found} devices. They are listed on the Devices page.`);
         })
         .catch(() => {
           /* keep watching until the status route answers */
@@ -140,11 +150,13 @@ export default function Discovery() {
     setImporting(true);
     setStatus('Importing prefixes…');
     try {
-      const data = await importNetboxPrefixes({ role: role.trim(), tag: tag.trim() });
+      const data = await importNetboxPrefixes({ region: region.trim(), role: role.trim(), tag: tag.trim() });
       setSubnets(data.subnets || []);
+      if (data.region) setRegion(data.region);
       if (data.role) setRole(data.role);
       if (data.tag) setTag(data.tag);
-      const who = data.roleName ? ` for ${data.roleName}` : '';
+      const whoBits = [data.regionName, data.roleName, data.tag ? `tag ${data.tag}` : ''].filter(Boolean);
+      const who = whoBits.length ? ` for ${whoBits.join(', ')}` : '';
       const early = data.truncated ? ' The import stopped early. Narrow the filter and import again.' : '';
       setStatus(`Imported ${data.count} prefixes (${data.added} new)${who}. About ${data.plannedHosts.toLocaleString()} hosts.${early}`);
     } catch (err: unknown) {
@@ -159,7 +171,7 @@ export default function Discovery() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Discovery</h1>
         <p className="mt-1 text-sm text-muted">
-          Scans use the SNMP credential bank. Live progress stays at the top of the page.
+          Scans use the SNMP credential bank. Devices show up on the Devices page as each subnet finishes, with a last discovered time.
         </p>
         {status ? <p className="mt-2 text-sm text-muted">{status}</p> : null}
       </div>
@@ -167,28 +179,17 @@ export default function Discovery() {
       <Panel title="NetBox prefixes">
         <div className="flex flex-col gap-3 px-4 py-4">
           <p className="text-sm text-muted">
-            Imports active prefixes and adds them to the scan list. The role matches a NetBox name or slug, for example Management.
+            Imports active prefixes and adds them to the scan list. Region, role, and tag match a NetBox name or slug.
           </p>
           {netboxUrl ? <p className="truncate font-mono text-xs text-faint">{netboxUrl}</p> : null}
-          <div className="flex flex-wrap gap-2">
-            <Input
-              value={role}
-              onChange={(event) => setRole(event.target.value)}
-              placeholder="Role"
-              aria-label="NetBox role"
-              className="w-52"
-            />
-            <Input
-              value={tag}
-              onChange={(event) => setTag(event.target.value)}
-              placeholder="Tag (optional)"
-              aria-label="NetBox tag"
-              className="w-52"
-            />
+          <div className="flex flex-wrap items-center gap-2">
+            <NetboxChoiceField label="NetBox region" value={region} onChange={setRegion} choices={regions} />
+            <NetboxChoiceField label="NetBox role" value={role} onChange={setRole} choices={roles} />
+            <NetboxChoiceField label="NetBox tag" value={tag} onChange={setTag} choices={tags} />
             <Button
               tone="solid"
               onClick={importPrefixes}
-              disabled={!netboxReady || importing || (!role.trim() && !tag.trim())}
+              disabled={!netboxReady || importing || (!region.trim() && !role.trim() && !tag.trim())}
             >
               {importing ? 'Importing…' : 'Import prefixes'}
             </Button>
@@ -290,30 +291,6 @@ export default function Discovery() {
         </div>
       </Panel>
 
-      <Panel title={results.length > 0 ? `Discovered devices (${results.length})` : 'Discovered devices'}>
-        {results.length === 0 ? (
-          <p className="px-4 py-6 text-sm text-muted">No devices discovered yet. Import prefixes or add a subnet, then scan.</p>
-        ) : (
-          <ul>
-            {results.map((device) => (
-              <li key={`${device.ip}-${device.subnet || ''}`} className="border-b border-line last:border-b-0">
-                <Link to={`/devices/${encodeURIComponent(device.ip)}`} className="block px-4 py-3">
-                  <span className="flex items-center justify-between gap-3">
-                    <span className="truncate font-mono text-sm">{device.sysName || device.ip}</span>
-                    <span className="shrink-0 font-mono text-xs text-faint">{formatWhen(device.discoveredAt)}</span>
-                  </span>
-                  <span className="mt-1 block truncate text-sm text-muted">
-                    {device.ip}
-                    {device.subnet ? ` · ${device.subnet}` : ''}
-                    {device.credentialName ? ` · ${device.credentialName}` : ''}
-                    {device.sysDescr ? ` · ${device.sysDescr}` : ''}
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Panel>
     </div>
   );
 }

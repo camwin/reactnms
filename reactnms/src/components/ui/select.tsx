@@ -35,9 +35,9 @@ export function Select({
         <SelectPrimitive.Content
           position="popper"
           sideOffset={4}
-          className="z-50 overflow-hidden rounded-lg border border-line bg-raised shadow-md"
+          className="z-50 max-h-80 overflow-hidden rounded-lg border border-line bg-raised shadow-md"
         >
-          <SelectPrimitive.Viewport className="p-1">
+          <SelectPrimitive.Viewport className="max-h-72 overflow-y-auto p-1">
             {options.map((option) => (
               <SelectPrimitive.Item
                 key={option.value}

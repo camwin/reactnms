@@ -17,7 +17,7 @@ export function DiscoveryRibbon() {
       try {
         const next = await fetchDiscoveryStatus();
         if (!cancel) setJob(next);
-        wait = next.running ? 1000 : 4000;
+        wait = next.running || next.pollingDevice || next.currentDevice ? 1000 : 2000;
       } catch (err: unknown) {
         if (!cancel && err instanceof ApiError && err.status === 404) setJob(null);
         wait = 8000;
@@ -40,13 +40,15 @@ export function DiscoveryRibbon() {
     if (open && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [open, job?.log.length]);
 
-  if (!job || (!job.running && job.log.length === 0 && !job.lastRun)) return null;
+  if (!job || (!job.running && !job.pollingDevice && !job.currentDevice && job.log.length === 0 && !job.lastRun)) return null;
 
   const summary = job.running
-    ? `Discovering ${job.currentSubnet || '…'}${job.currentCredential ? ` · ${job.currentCredential}` : ''} · ${job.hostsScanned}/${job.hostsTotal || '…'} · ${job.found} found`
-    : job.error
-      ? `Discovery stopped · ${job.error}`
-      : `Discovery idle · ${job.found} devices · ${formatAgo(job.lastRun)}`;
+    ? `Discovering ${job.currentSubnet || '…'}${job.currentCredential ? ` · ${job.currentCredential}` : ''} · ${job.hostsScanned}/${job.hostsTotal || '…'} hosts · ${job.found} devices${job.currentDevice ? ` · polling ${job.currentDevice}` : ''}`
+    : job.pollingDevice
+      ? `Polling ${job.pollingDevice}`
+      : job.error
+        ? `Discovery stopped · ${job.error}`
+        : `Discovery idle · ${job.found} devices · ${formatAgo(job.lastRun)}`;
 
   return (
     <section className="sticky top-14 z-20 mb-4 rounded-xl border border-line bg-surface" aria-live="polite">

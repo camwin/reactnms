@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { Bell, LayoutDashboard, Menu, Radar, Server, Settings, Waypoints } from 'lucide-react';
+import { Activity, Bell, History, LayoutDashboard, Menu, Radar, Server, Settings, Waypoints } from 'lucide-react';
 import { DiscoveryRibbon } from '@/components/nms/discovery-ribbon';
-import { fetchAlertRules, fetchHealth } from '@/lib/api';
+import { GlobalSearch } from '@/components/nms/global-search';
+import { fetchActiveAlerts, fetchHealth } from '@/lib/api';
 import { cn } from '@/lib/cn';
 
 const NAV = [
@@ -10,14 +11,16 @@ const NAV = [
   { to: '/devices', label: 'Devices', icon: Server, end: false, mobile: true },
   { to: '/topology', label: 'Topology', icon: Waypoints, end: true, mobile: true },
   { to: '/discovery', label: 'Discovery', icon: Radar, end: true, mobile: false },
+  { to: '/events', label: 'Events', icon: Activity, end: true, mobile: false },
   { to: '/alerts', label: 'Alerts', icon: Bell, end: true, mobile: true },
+  { to: '/alerts/history', label: 'History', icon: History, end: true, mobile: false },
   { to: '/settings', label: 'Settings', icon: Settings, end: true, mobile: false },
 ] as const;
 
 export default function Layout() {
   const path = useLocation().pathname;
   const [live, setLive] = useState<boolean | null>(null);
-  const [enabledRules, setEnabledRules] = useState(0);
+  const [openAlerts, setOpenAlerts] = useState(0);
   const [menuPath, setMenuPath] = useState<string | null>(null);
   const menuOpen = menuPath === path;
   const menuRef = useRef<HTMLDivElement>(null);
@@ -41,10 +44,10 @@ export default function Layout() {
         if (!cancel) setLive(false);
       }
       try {
-        const rules = await fetchAlertRules();
-        if (!cancel) setEnabledRules(rules.filter((rule) => rule.enabled !== false).length);
+        const alerts = await fetchActiveAlerts();
+        if (!cancel) setOpenAlerts(alerts.filter((alert) => !alert.ackedAt).length);
       } catch {
-        if (!cancel) setEnabledRules(0);
+        if (!cancel) setOpenAlerts(0);
       }
     }
     pull();
@@ -69,12 +72,13 @@ export default function Layout() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <GlobalSearch />
             <div className="flex items-center gap-2 font-mono text-xs text-muted">
               <span
                 className={cn('size-1.5 rounded-full', live === false ? 'bg-down' : 'bg-accent', live === true && 'live-dot')}
                 aria-hidden
               />
-              {live === false ? <span className="text-down">Backend unreachable</span> : live === true ? 'Live' : 'Checking'}
+              {live === false ? <span className="sr-only text-down sm:not-sr-only">Backend unreachable</span> : live === true ? <span className="sr-only sm:not-sr-only">Live</span> : <span className="sr-only sm:not-sr-only">Checking</span>}
             </div>
             <div className="relative lg:hidden" ref={menuRef}>
               <button
@@ -128,16 +132,16 @@ export default function Layout() {
               >
                 <item.icon className="size-4" strokeWidth={1.75} />
                 <span className="flex-1">{item.label}</span>
-                {item.to === '/alerts' && enabledRules > 0 ? (
+                {item.to === '/alerts' && openAlerts > 0 ? (
                   <span className="rounded-full bg-down/15 px-2 py-0.5 font-mono text-xs tabular-nums text-down">
-                    {enabledRules}
+                    {openAlerts}
                   </span>
                 ) : null}
               </NavLink>
             ))}
           </nav>
         </aside>
-        <main className="mx-auto w-full max-w-6xl px-4 py-5 pb-28 lg:px-8 lg:pb-10">
+        <main className="w-full max-w-none px-4 py-5 pb-28 lg:px-6 lg:pb-10">
           <DiscoveryRibbon />
           <Outlet />
         </main>
@@ -162,9 +166,9 @@ export default function Layout() {
               >
                 <item.icon className="size-5" strokeWidth={1.75} />
                 {item.label}
-                {item.to === '/alerts' && enabledRules > 0 ? (
+                {item.to === '/alerts' && openAlerts > 0 ? (
                   <span className="absolute right-5 top-2 rounded-full bg-down px-1.5 font-mono text-xs leading-4 text-bg tabular-nums">
-                    {enabledRules}
+                    {openAlerts}
                   </span>
                 ) : null}
               </NavLink>

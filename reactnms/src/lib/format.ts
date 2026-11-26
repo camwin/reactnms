@@ -32,9 +32,29 @@ export function formatSnmpUptime(ticks: number) {
   return `${hours}h ${minutes}m`;
 }
 
+export function interfaceLabel(name?: string, alias?: string) {
+  const base = (name || '').trim();
+  const extra = (alias || '').trim();
+  if (base && extra) return `${base} — ${extra}`;
+  return base || extra;
+}
+
 export function formatWhen(iso?: string | null) {
   if (!iso) return '—';
   const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleString();
+}
+
+export function formatDuration(ms?: number | null) {
+  if (ms == null || !Number.isFinite(ms)) return '—';
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(2)} s`;
+}
+
+export function formatEpoch(ms?: number | null) {
+  if (ms == null) return '—';
+  const date = new Date(ms);
   if (Number.isNaN(date.getTime())) return '—';
   return date.toLocaleString();
 }
