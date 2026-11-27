@@ -4,18 +4,24 @@ import { NetboxChoiceField } from '@/components/nms/netbox-fields';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
 import {
-  DEVICE_TYPE_CHOICES,
+  createAuthUser,
+  deleteAuthUser,
+  fetchAuthUsers,
   fetchDiscoveryConfig,
   fetchNetboxOptions,
   fetchPoller,
+  logout,
+  saveAuthSettings,
   saveDiscoveryConfig,
   saveServiceAccount,
   saveSyslog,
-  type DeviceTypeChoice,
+  type AuthPublic,
+  type AuthUser,
   type NetboxChoice,
   type PollerSummary,
   type SnmpCredential,
@@ -44,14 +50,11 @@ export default function Settings() {
   const [poller, setPoller] = useState<PollerSummary | null>(null);
   const [accountEnabled, setAccountEnabled] = useState(false);
   const [accountUser, setAccountUser] = useState('');
-  const [accountType, setAccountType] = useState('cisco_ios');
-  const [accountCustom, setAccountCustom] = useState('');
   const [accountPassword, setAccountPassword] = useState('');
   const [accountEnable, setAccountEnable] = useState('');
   const [clearEnable, setClearEnable] = useState(false);
   const [passwordSet, setPasswordSet] = useState(false);
   const [enableSet, setEnableSet] = useState(false);
-  const [deviceTypes, setDeviceTypes] = useState<DeviceTypeChoice[]>(DEVICE_TYPE_CHOICES);
   const [accountNote, setAccountNote] = useState('');
   const [backupEnabled, setBackupEnabled] = useState(false);
   const [backupCron, setBackupCron] = useState('0 2 * * *');
@@ -63,6 +66,7 @@ export default function Settings() {
   const [syslogRows, setSyslogRows] = useState('100000');
   const [syslogStatus, setSyslogStatus] = useState('stopped');
   const [syslogNote, setSyslogNote] = useState('');
+  const [auth, setAuth] = useState<AuthPublic | null>(null);
 
   useEffect(() => {
     let cancel = false;
@@ -78,21 +82,12 @@ export default function Settings() {
         setIgnoreText((cfg.interfaceIgnore || []).join('\n'));
         const account = cfg.serviceAccount;
         if (account) {
-          const choices = account.deviceTypes?.length ? account.deviceTypes : DEVICE_TYPE_CHOICES;
-          setDeviceTypes(choices);
-          const known = new Set(choices.map((item) => item.id).filter((id) => id !== 'other'));
           setAccountEnabled(!!account.enabled);
           setAccountUser(account.username || '');
           setPasswordSet(!!account.passwordSet);
           setEnableSet(!!account.enableSet);
-          if (known.has(account.deviceType)) {
-            setAccountType(account.deviceType);
-            setAccountCustom('');
-          } else {
-            setAccountType('other');
-            setAccountCustom(account.deviceType || '');
-          }
         }
+        if (cfg.auth) setAuth(cfg.auth);
         if (cfg.backupSchedule) {
           setBackupEnabled(!!cfg.backupSchedule.enabled);
           setBackupCron(cfg.backupSchedule.cron || '0 2 * * *');
@@ -320,7 +315,7 @@ export default function Settings() {
             This account logs in with Netmiko and backs up the configuration shown on a device. The password is encrypted on the server so it can be used again. It is not a one-way hash, and it is never shown after you save it. Leave the password blank to keep the stored secret.
           </p>
           <p className="text-sm text-muted">
-            The device type is the Netmiko default for scheduled and manual backups. A device can use a different type on its own settings page. Devices without that override use this one.
+            The Netmiko device type is detected from each device's operating system. Set a different type on that device's settings page when the detection does not match.
           </p>
           <label className="inline-flex min-h-11 items-center gap-2 text-sm">
             <Checkbox checked={accountEnabled} onCheckedChange={(checked) => setAccountEnabled(checked === true)} />
@@ -334,15 +329,6 @@ export default function Settings() {
               <Checkbox checked={clearEnable} onCheckedChange={(checked) => setClearEnable(checked === true)} />
               Remove the stored enable secret
             </label>
-          ) : null}
-          <Select
-            ariaLabel="Default device type"
-            value={accountType}
-            onValueChange={setAccountType}
-            options={deviceTypes.map((item) => ({ value: item.id, label: item.label }))}
-          />
-          {accountType === 'other' ? (
-            <Input aria-label="Netmiko device type" placeholder="netmiko device_type" value={accountCustom} onChange={(event) => setAccountCustom(event.target.value)} className="font-mono" />
           ) : null}
           <label className="flex min-h-11 items-center gap-3 text-sm">
             <Switch checked={backupEnabled} onCheckedChange={setBackupEnabled} aria-label="Enable scheduled backups" />
@@ -362,12 +348,10 @@ export default function Settings() {
             <Button
               tone="solid"
               onClick={() => {
-                const deviceType = accountType === 'other' ? accountCustom.trim() : accountType;
                 setAccountNote('Saving…');
                 saveServiceAccount({
                   enabled: accountEnabled,
                   username: accountUser.trim(),
-                  deviceType,
                   password: accountPassword,
                   enable: accountEnable,
                   clearEnable,
@@ -406,9 +390,21 @@ export default function Settings() {
             <Checkbox checked={syslogEnabled} onCheckedChange={(checked) => setSyslogEnabled(checked === true)} />
             Enable syslog receiver
           </label>
-          <Input aria-label="Syslog UDP port" value={syslogPort} onChange={(event) => setSyslogPort(event.target.value)} />
-          <Input aria-label="Syslog retention days" value={syslogDays} onChange={(event) => setSyslogDays(event.target.value)} />
-          <Input aria-label="Syslog maximum rows" value={syslogRows} onChange={(event) => setSyslogRows(event.target.value)} />
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="syslog-port">UDP port</Label>
+            <Input id="syslog-port" aria-label="Syslog UDP port" value={syslogPort} onChange={(event) => setSyslogPort(event.target.value)} />
+            <p className="text-xs text-muted">Port 514 usually needs extra permission. 5514 is the default.</p>
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="syslog-days">Retention days</Label>
+            <Input id="syslog-days" aria-label="Syslog retention days" value={syslogDays} onChange={(event) => setSyslogDays(event.target.value)} />
+            <p className="text-xs text-muted">Messages older than this many days are deleted.</p>
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="syslog-rows">Maximum rows</Label>
+            <Input id="syslog-rows" aria-label="Syslog maximum rows" value={syslogRows} onChange={(event) => setSyslogRows(event.target.value)} />
+            <p className="text-xs text-muted">The store also drops the oldest rows after this many messages. The shorter of the two limits wins.</p>
+          </div>
           <p className="text-sm text-muted">Status: {syslogStatus}</p>
           <div className="flex items-center gap-3">
             <Button
@@ -438,6 +434,8 @@ export default function Settings() {
         </div>
       </Panel>
 
+      <AuthPanel auth={auth} onAuth={setAuth} />
+
       <PollerPanel poller={poller} onPoller={setPoller} />
     </div>
   );
@@ -449,6 +447,177 @@ function ipKey(ip: string) {
   const parts = ip.split('.').map((part) => Number(part));
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return ip;
   return parts.map((part) => String(part).padStart(3, '0')).join('.');
+}
+
+const AUTH_MODES = [
+  { value: 'off', label: 'Off' },
+  { value: 'local', label: 'Local' },
+  { value: 'ad', label: 'Active Directory' },
+  { value: 'ldap', label: 'LDAP' },
+  { value: 'sso', label: 'SSO' },
+];
+
+function AuthPanel({ auth, onAuth }: { auth: AuthPublic | null; onAuth: (value: AuthPublic) => void }) {
+  const [mode, setMode] = useState(auth?.mode || 'off');
+  const [adUrl, setAdUrl] = useState(auth?.ad.url || '');
+  const [adDomain, setAdDomain] = useState(auth?.ad.domain || '');
+  const [ldapUrl, setLdapUrl] = useState(auth?.ldap.url || '');
+  const [baseDn, setBaseDn] = useState(auth?.ldap.baseDn || '');
+  const [userFilter, setUserFilter] = useState(auth?.ldap.userFilter || '(uid={{username}})');
+  const [bindDn, setBindDn] = useState(auth?.ldap.bindDn || '');
+  const [bindPassword, setBindPassword] = useState('');
+  const [issuer, setIssuer] = useState(auth?.sso.issuer || '');
+  const [clientId, setClientId] = useState(auth?.sso.clientId || '');
+  const [redirectUri, setRedirectUri] = useState(auth?.sso.redirectUri || '');
+  const [clientSecret, setClientSecret] = useState('');
+  const [users, setUsers] = useState<AuthUser[]>([]);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [note, setNote] = useState('');
+
+  useEffect(() => {
+    if (!auth) return;
+    setMode(auth.mode || 'off');
+    setAdUrl(auth.ad.url || '');
+    setAdDomain(auth.ad.domain || '');
+    setLdapUrl(auth.ldap.url || '');
+    setBaseDn(auth.ldap.baseDn || '');
+    setUserFilter(auth.ldap.userFilter || '(uid={{username}})');
+    setBindDn(auth.ldap.bindDn || '');
+    setIssuer(auth.sso.issuer || '');
+    setClientId(auth.sso.clientId || '');
+    setRedirectUri(auth.sso.redirectUri || '');
+  }, [auth]);
+
+  useEffect(() => {
+    let cancel = false;
+    fetchAuthUsers()
+      .then((body) => {
+        if (!cancel) setUsers(body.users || []);
+      })
+      .catch(() => {
+        if (!cancel) setUsers([]);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, []);
+
+  return (
+    <Panel title="Authentication">
+      <div className="flex max-w-lg flex-col gap-3 px-4 py-4">
+        <p className="text-sm text-muted">
+          Authentication stays off until you choose a mode, so this install is not locked out. Create a local user before you turn Local on. After you turn authentication on, the next page load asks you to sign in.
+        </p>
+        <Select ariaLabel="Authentication mode" value={mode} onValueChange={setMode} options={AUTH_MODES} />
+        {mode === 'ad' ? (
+          <>
+            <Label htmlFor="ad-url">Active Directory server</Label>
+            <Input id="ad-url" aria-label="Active Directory URL" placeholder="ldaps://dc.example.com" value={adUrl} onChange={(event) => setAdUrl(event.target.value)} />
+            <Label htmlFor="ad-domain">Domain</Label>
+            <Input id="ad-domain" aria-label="Active Directory domain" placeholder="example.com" value={adDomain} onChange={(event) => setAdDomain(event.target.value)} />
+          </>
+        ) : null}
+        {mode === 'ldap' ? (
+          <>
+            <Label htmlFor="ldap-url">LDAP server</Label>
+            <Input id="ldap-url" aria-label="LDAP URL" placeholder="ldaps://ldap.example.com" value={ldapUrl} onChange={(event) => setLdapUrl(event.target.value)} />
+            <Label htmlFor="ldap-base">Base DN</Label>
+            <Input id="ldap-base" aria-label="LDAP base DN" placeholder="ou=people,dc=example,dc=com" value={baseDn} onChange={(event) => setBaseDn(event.target.value)} />
+            <Label htmlFor="ldap-filter">User filter</Label>
+            <Input id="ldap-filter" aria-label="LDAP user filter" value={userFilter} onChange={(event) => setUserFilter(event.target.value)} className="font-mono" />
+            <Label htmlFor="ldap-bind">Service bind DN</Label>
+            <Input id="ldap-bind" aria-label="LDAP bind DN" placeholder="Optional. Blank uses an anonymous search." value={bindDn} onChange={(event) => setBindDn(event.target.value)} />
+            <Input aria-label="LDAP bind password" type="password" placeholder={auth?.ldap.passwordSet ? 'Bind password saved' : 'Bind password'} value={bindPassword} onChange={(event) => setBindPassword(event.target.value)} />
+          </>
+        ) : null}
+        {mode === 'sso' ? (
+          <>
+            <Label htmlFor="sso-issuer">Issuer</Label>
+            <Input id="sso-issuer" aria-label="SSO issuer" placeholder="https://login.example.com/realms/network" value={issuer} onChange={(event) => setIssuer(event.target.value)} />
+            <Label htmlFor="sso-client">Client ID</Label>
+            <Input id="sso-client" aria-label="SSO client ID" value={clientId} onChange={(event) => setClientId(event.target.value)} />
+            <Label htmlFor="sso-redirect">Redirect URI</Label>
+            <Input id="sso-redirect" aria-label="SSO redirect URI" placeholder="https://host/api/auth/sso/callback" value={redirectUri} onChange={(event) => setRedirectUri(event.target.value)} />
+            <p className="text-xs text-muted">This is the backend callback. The client secret is encrypted and is not shown again. Leave it blank to keep the stored secret.</p>
+            <Input aria-label="SSO client secret" type="password" placeholder={auth?.sso.secretSet ? 'Client secret saved' : 'Client secret'} value={clientSecret} onChange={(event) => setClientSecret(event.target.value)} />
+          </>
+        ) : null}
+        <div className="flex items-center gap-3">
+          <Button
+            tone="solid"
+            onClick={() => {
+              setNote('Saving…');
+              saveAuthSettings({
+                mode,
+                ad: { url: adUrl.trim(), domain: adDomain.trim() },
+                ldap: { url: ldapUrl.trim(), baseDn: baseDn.trim(), userFilter: userFilter.trim(), bindDn: bindDn.trim(), bindPassword },
+                sso: { issuer: issuer.trim(), clientId: clientId.trim(), redirectUri: redirectUri.trim(), clientSecret },
+              })
+                .then((saved) => {
+                  onAuth(saved);
+                  setBindPassword('');
+                  setClientSecret('');
+                  setNote('Saved');
+                })
+                .catch((err: unknown) => setNote(err instanceof Error ? err.message : 'Could not save authentication'));
+            }}
+          >
+            Save authentication
+          </Button>
+          {auth?.mode && auth.mode !== 'off' ? (
+            <Button tone="line" onClick={() => logout().finally(() => window.location.assign('/login'))}>Sign out</Button>
+          ) : null}
+          {note ? <span className="text-sm text-muted">{note}</span> : null}
+        </div>
+        <div className="mt-2 border-t border-line pt-3">
+          <h3 className="font-mono text-xs uppercase tracking-widest text-faint">Local users</h3>
+          <p className="mt-2 text-sm text-muted">Usernames can contain letters, numbers, and . _ @ -. Passwords need at least 8 characters.</p>
+          {users.length ? (
+            <ul className="mt-2">
+              {users.map((user) => (
+                <li key={user.username} className="flex items-center justify-between gap-3 border-b border-line py-2 text-sm">
+                  <span className="font-mono">{user.username}</span>
+                  <button
+                    type="button"
+                    className="min-h-11 text-sm text-down"
+                    onClick={() => {
+                      deleteAuthUser(user.username)
+                        .then(() => setUsers((current) => current.filter((item) => item.username !== user.username)))
+                        .catch((err: unknown) => setNote(err instanceof Error ? err.message : 'Could not remove the user'));
+                    }}
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-2 text-sm text-muted">No local users yet.</p>
+          )}
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Input aria-label="New username" placeholder="Username" value={username} onChange={(event) => setUsername(event.target.value)} className="w-40" />
+            <Input aria-label="New password" type="password" placeholder="Password" value={password} onChange={(event) => setPassword(event.target.value)} className="w-40" />
+            <Button
+              tone="line"
+              onClick={() => {
+                createAuthUser(username.trim(), password)
+                  .then((saved) => {
+                    setUsers((current) => [...current, { username: saved.username, createdAt: Date.now() }].sort((a, b) => a.username.localeCompare(b.username)));
+                    setUsername('');
+                    setPassword('');
+                    setNote(`Added ${saved.username}`);
+                  })
+                  .catch((err: unknown) => setNote(err instanceof Error ? err.message : 'Could not create the user'));
+              }}
+            >
+              Add user
+            </Button>
+          </div>
+        </div>
+      </div>
+    </Panel>
+  );
 }
 
 function PollerPanel({ poller, onPoller }: { poller: PollerSummary | null; onPoller: (value: PollerSummary) => void }) {

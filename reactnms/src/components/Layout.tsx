@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { Activity, Bell, History, LayoutDashboard, Menu, Radar, Server, Settings, Waypoints } from 'lucide-react';
+import { Activity, Bell, History, LayoutDashboard, Menu, Radar, ScrollText, Search, Server, Settings, Waypoints } from 'lucide-react';
 import { DiscoveryRibbon } from '@/components/nms/discovery-ribbon';
 import { GlobalSearch } from '@/components/nms/global-search';
 import { fetchActiveAlerts, fetchHealth } from '@/lib/api';
@@ -12,6 +12,8 @@ const NAV = [
   { to: '/topology', label: 'Topology', icon: Waypoints, end: true, mobile: true },
   { to: '/discovery', label: 'Discovery', icon: Radar, end: true, mobile: false },
   { to: '/events', label: 'Events', icon: Activity, end: true, mobile: false },
+  { to: '/search', label: 'Network Search', icon: Search, end: true, mobile: false },
+  { to: '/syslog', label: 'Syslog', icon: ScrollText, end: true, mobile: false },
   { to: '/alerts', label: 'Alerts', icon: Bell, end: true, mobile: true },
   { to: '/alerts/history', label: 'History', icon: History, end: true, mobile: false },
   { to: '/settings', label: 'Settings', icon: Settings, end: true, mobile: false },

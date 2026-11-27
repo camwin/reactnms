@@ -19,6 +19,23 @@ export const DEVICE_TYPES = [
 
 const KNOWN = new Set(DEVICE_TYPES.map((item) => item.id));
 
+export function deviceTypeFromDescr(sysDescr) {
+  const text = String(sysDescr || '').toLowerCase();
+  if (!text.trim()) return '';
+  if (text.includes('nx-os') || text.includes('nexus')) return 'cisco_nxos';
+  if (text.includes('ios-xr') || text.includes('ios xr')) return 'cisco_xr';
+  if (text.includes('adaptive security') || text.includes('cisco asa') || /\basa\b/.test(text)) return 'cisco_asa';
+  if (text.includes('ios-xe') || text.includes('ios xe')) return 'cisco_xe';
+  if (text.includes('cisco ios') || text.includes('ios software')) return 'cisco_ios';
+  if (text.includes('junos') || text.includes('juniper')) return 'juniper_junos';
+  if (text.includes('arista') || /\beos\b/.test(text)) return 'arista_eos';
+  if (text.includes('extremexos') || text.includes('exos')) return 'extreme_exos';
+  if (/\bvsp\b/.test(text) || text.includes('voss')) return 'extreme_vsp';
+  if (/\baxis\b/.test(text)) return 'axis';
+  if (text.includes('ocnos') || text.includes('ip infusion')) return 'ipinfusion_ocnos';
+  return '';
+}
+
 export function normalizeDeviceType(value) {
   const raw = String(value || '').trim();
   if (!raw || raw === 'other') return '';

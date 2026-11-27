@@ -75,7 +75,7 @@ test('the core site stands alone and other sites show the path to it', () => {
   assert.equal(core.links.length, 0);
   assert.equal(core.note, 'Core');
   const remote = coreView(sites, links, 'Remote', 'Main');
-  assert.deepEqual(remote.sites.map((site) => site.name), ['Remote', 'Annex', 'Main']);
+  assert.deepEqual(remote.sites.map((site) => site.name), ['Main', 'Annex', 'Remote']);
   assert.deepEqual(remote.sites.find((site) => site.name === 'Main').devices.map((device) => device.ip), ['10.0.0.1']);
   assert.equal(remote.links.length, 2);
   assert.equal(remote.note, 'Path from Remote to the core');

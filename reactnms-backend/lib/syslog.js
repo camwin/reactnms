@@ -168,5 +168,31 @@ export function createSyslogStore(db) {
     return rows.map(mapRow);
   }
 
-  return { insert, prune, forDevice };
+  function list({ q = '', severity = '', limit = 200 } = {}) {
+    const where = [];
+    const params = [];
+    const query = String(q || '').trim();
+    if (query) {
+      where.push('(message LIKE ? OR host LIKE ? OR source_ip LIKE ?)');
+      const like = likeTerm(query);
+      params.push(like, like, like);
+    }
+    const level = String(severity || '').trim();
+    if (level === 'error') where.push('severity <= 3');
+    else if (/^[0-7]$/.test(level)) {
+      where.push('severity = ?');
+      params.push(Number(level));
+    }
+    params.push(Math.max(1, Math.min(500, Number(limit) || 200)));
+    const rows = db.prepare(`
+      SELECT id, at, source_ip, facility, severity, host, message
+      FROM syslog
+      ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(...params);
+    return rows.map(mapRow);
+  }
+
+  return { insert, prune, forDevice, list };
 }

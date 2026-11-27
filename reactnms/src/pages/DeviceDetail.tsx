@@ -10,6 +10,8 @@ import {
   ApiError,
   discoverDevice,
   fetchDevice,
+  fetchDeviceOptics,
+  fetchDeviceSerials,
   fetchSelections,
   fetchStats,
   fetchTraffic,
@@ -42,6 +44,8 @@ export default function DeviceDetail() {
   const [discoverNote, setDiscoverNote] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
   const [tab, setTab] = useState('interfaces');
+  const [serialText, setSerialText] = useState('');
+  const [opticsOn, setOpticsOn] = useState(false);
 
   async function discover() {
     if (!ip) return;
@@ -105,6 +109,32 @@ export default function DeviceDetail() {
       })
       .catch(() => {
         if (!cancel) setStats(null);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [ip, reloadKey]);
+
+  useEffect(() => {
+    if (!ip) return;
+    let cancel = false;
+    setSerialText('');
+    setOpticsOn(false);
+    fetchDeviceSerials(ip)
+      .then((body) => {
+        if (cancel) return;
+        const text = (body.serials || []).map((row) => row.serial).filter(Boolean).join(', ');
+        if (text) setSerialText(text);
+      })
+      .catch(() => {
+        /* the identity line keeps the cached serial */
+      });
+    fetchDeviceOptics(ip)
+      .then((body) => {
+        if (!cancel) setOpticsOn(!!body.detected || (body.optics || []).length > 0);
+      })
+      .catch(() => {
+        if (!cancel) setOpticsOn(false);
       });
     return () => {
       cancel = true;
@@ -175,6 +205,8 @@ export default function DeviceDetail() {
     { id: 'interfaces', label: 'Interfaces' },
     ...(device.router ? [{ id: 'routing', label: 'Routing' }] : []),
     { id: 'alerts', label: 'Alerts' },
+    { id: 'errors', label: 'Errors' },
+    ...(opticsOn ? [{ id: 'optics', label: 'Optics' }] : []),
     { id: 'vlans', label: 'VLANs' },
     { id: 'neighbors', label: 'Neighbors' },
     { id: 'inventory', label: 'Inventory' },
@@ -187,6 +219,7 @@ export default function DeviceDetail() {
     ['Description', device.sysDescr || '—'],
     ['Location', device.sysLocation || '—'],
     ['Contact', device.sysContact || '—'],
+    ['Serial', serialText || device.serials || 'Not collected yet'],
     ['Management', device.ip],
     ['Last discovered', device.discoveredAt ? formatWhen(device.discoveredAt) : '—'],
     ...(otherAddresses.length ? [['Other addresses', otherAddresses.join(', ')]] : []),

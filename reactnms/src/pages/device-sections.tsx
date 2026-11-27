@@ -3,21 +3,27 @@ import { FilterChip, Panel } from '@/components/nms/bits';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
+import { OpticChart } from '@/components/optic-chart';
 import {
   acknowledgeAlert,
   backupDeviceConfig,
   fetchActiveAlerts,
   fetchAlertLog,
   fetchDeviceConfig,
+  fetchDeviceErrors,
   fetchDeviceInventory,
   fetchDeviceLogs,
   fetchDeviceNeighbors,
+  fetchDeviceOptics,
   fetchDeviceRoutes,
   fetchDeviceVlans,
   type ActiveAlert,
   type AlertLogLine,
   type DeviceConfigBackup,
+  type DeviceErrors,
+  type DeviceEvent,
   type DeviceLogs,
+  type DeviceOptics,
   type InventoryRow,
   type NeighborRow,
   type RouteRow,
@@ -155,6 +161,7 @@ export function AlertsSection({ ip }: { ip: string }) {
 export function VlanSection({ ip }: { ip: string }) {
   const [rows, setRows] = useState<VlanRow[] | null>(null);
   const [error, setError] = useState('');
+  const [query, setQuery] = useState('');
   useEffect(() => {
     let cancel = false;
     fetchDeviceVlans(ip)
@@ -173,15 +180,26 @@ export function VlanSection({ ip }: { ip: string }) {
   if (!rows && !error) return <Note>Reading VLANs…</Note>;
   if (error && !rows?.length) return <Note>{error}</Note>;
   if (!rows?.length) return <Note>No VLANs returned.</Note>;
+  const needle = query.trim().toLowerCase();
+  const shown = needle
+    ? rows.filter((vlan) => vlan.id.toLowerCase().includes(needle) || vlan.name.toLowerCase().includes(needle))
+    : rows;
   return (
-    <ul>
-      {rows.map((vlan) => (
-        <li key={`${vlan.source}|${vlan.id}`} className="flex items-baseline justify-between gap-3 border-b border-line px-4 py-2 last:border-b-0">
-          <span className="font-mono text-sm">{vlan.id}{vlan.name ? ` · ${vlan.name}` : ''}</span>
-          <span className="font-mono text-xs uppercase text-faint">{vlan.source}</span>
-        </li>
-      ))}
-    </ul>
+    <div>
+      <div className="border-b border-line px-4 py-3">
+        <Input aria-label="Search VLANs" placeholder="Search VLAN ID or name" value={query} onChange={(event) => setQuery(event.target.value)} />
+      </div>
+      {shown.length === 0 ? <Note>No VLANs match.</Note> : (
+        <ul>
+          {shown.map((vlan) => (
+            <li key={`${vlan.source}|${vlan.id}`} className="flex items-baseline justify-between gap-3 border-b border-line px-4 py-2 last:border-b-0">
+              <span className="font-mono text-sm">{vlan.id}{vlan.name ? ` · ${vlan.name}` : ''}</span>
+              <span className="font-mono text-xs uppercase text-faint">{vlan.source}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -398,9 +416,129 @@ export function ConfigSection({ ip }: { ip: string }) {
   );
 }
 
+function EventList({ rows }: { rows: DeviceEvent[] }) {
+  if (!rows.length) return null;
+  return (
+    <ul>
+      {rows.map((event) => (
+        <li key={event.id} className="border-b border-line px-4 py-3 text-sm last:border-b-0">
+          <div className="font-mono text-xs text-faint">{formatWhen(new Date(event.at).toISOString())}</div>
+          <p className="mt-1">{event.summary}</p>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export function ErrorsSection({ ip }: { ip: string }) {
+  const [body, setBody] = useState<DeviceErrors | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let cancel = false;
+    fetchDeviceErrors(ip)
+      .then((next) => {
+        if (!cancel) setBody(next);
+      })
+      .catch((err: unknown) => {
+        if (!cancel) setError(err instanceof Error ? err.message : 'Could not read errors');
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [ip]);
+  if (!body && !error) return <Note>Reading errors…</Note>;
+  if (error && !body) return <Note>{error}</Note>;
+  if (!body) return null;
+  const empty = !body.interfaces.length && !body.syslog.length && !body.reachability.length && !body.link.length && !body.switching.length;
+  return (
+    <div className="flex flex-col gap-4 py-3">
+      {body.error ? <p className="px-4 text-sm text-down">{body.error}</p> : null}
+      {empty ? <Note>No interface, syslog, reachability, link, or spanning-tree errors.</Note> : null}
+      {body.interfaces.length ? (
+        <section>
+          <h3 className="px-4 font-mono text-xs uppercase tracking-widest text-faint">Interface</h3>
+          <ul>
+            {body.interfaces.map((row) => (
+              <li key={row.index} className="border-b border-line px-4 py-2 text-sm">
+                <span className="font-mono">{row.name}</span>
+                <span className="mt-1 block text-muted">
+                  In errors {row.inErrors.toLocaleString()} · In discards {row.inDiscards.toLocaleString()} · Out errors {row.outErrors.toLocaleString()} · Out discards {row.outDiscards.toLocaleString()}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+      {body.syslog.length ? (
+        <section>
+          <h3 className="px-4 font-mono text-xs uppercase tracking-widest text-faint">Syslog</h3>
+          <ul>
+            {body.syslog.map((row) => (
+              <li key={row.id} className="border-b border-line px-4 py-2 text-sm">
+                <span className="font-mono text-xs uppercase text-down">{row.severityName}</span>
+                <span className="ml-2 text-muted">{row.message}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+      {body.reachability.length ? <section><h3 className="px-4 font-mono text-xs uppercase tracking-widest text-faint">Reachability</h3><EventList rows={body.reachability} /></section> : null}
+      {body.link.length ? <section><h3 className="px-4 font-mono text-xs uppercase tracking-widest text-faint">Link</h3><EventList rows={body.link} /></section> : null}
+      {body.switching.length ? <section><h3 className="px-4 font-mono text-xs uppercase tracking-widest text-faint">Switching</h3><EventList rows={body.switching} /></section> : null}
+    </div>
+  );
+}
+
+export function OpticsSection({ ip }: { ip: string }) {
+  const [body, setBody] = useState<DeviceOptics | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let cancel = false;
+    async function pull() {
+      try {
+        const next = await fetchDeviceOptics(ip);
+        if (!cancel) {
+          setBody(next);
+          setError(next.error || '');
+        }
+      } catch (err: unknown) {
+        if (!cancel) setError(err instanceof Error ? err.message : 'Could not read optics');
+      }
+    }
+    pull();
+    const id = window.setInterval(pull, 30000);
+    return () => {
+      cancel = true;
+      window.clearInterval(id);
+    };
+  }, [ip]);
+  if (!body && !error) return <Note>Reading optical levels…</Note>;
+  if (error && !body?.optics.length) return <Note>{error}</Note>;
+  const names = body?.optics.map((optic) => optic.name) || [];
+  return (
+    <div className="flex flex-col gap-3 py-3">
+      {names.map((name) => {
+        const points = (body?.history || []).filter((sample) => sample.name === name).map((sample) => ({ t: sample.t, rx: sample.rx, tx: sample.tx }));
+        const current = body?.optics.find((optic) => optic.name === name);
+        return (
+          <section key={name} className="px-4">
+            <h3 className="font-mono text-sm">{name}</h3>
+            <p className="mt-1 font-mono text-xs text-muted">
+              Rx {current?.rx == null ? '—' : `${current.rx.toFixed(2)} dBm`} · Tx {current?.tx == null ? '—' : `${current.tx.toFixed(2)} dBm`}
+            </p>
+            {points.length < 2 ? <p className="mt-2 text-sm text-muted">Collecting data… ({points.length}/2)</p> : <OpticChart points={points} />}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
 export function DeviceSection({ ip, tab }: { ip: string; tab: string }) {
   if (tab === 'routing') return <Panel title="Routing"><RoutingSection ip={ip} /></Panel>;
   if (tab === 'alerts') return <Panel title="Alerts"><AlertsSection ip={ip} /></Panel>;
+  if (tab === 'errors') return <Panel title="Errors"><ErrorsSection ip={ip} /></Panel>;
+  if (tab === 'optics') return <Panel title="Optics"><OpticsSection ip={ip} /></Panel>;
   if (tab === 'vlans') return <Panel title="VLANs"><VlanSection ip={ip} /></Panel>;
   if (tab === 'neighbors') return <Panel title="Neighbors"><NeighborsSection ip={ip} /></Panel>;
   if (tab === 'inventory') return <Panel title="Inventory"><InventorySection ip={ip} /></Panel>;

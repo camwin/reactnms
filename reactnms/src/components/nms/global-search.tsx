@@ -1,19 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search } from 'lucide-react';
-import { fetchDiscoveryResults, type DiscoveredDevice } from '@/lib/api';
+import { fetchCatalogSerials, fetchDiscoveryResults, type DiscoveredDevice, type SerialRow } from '@/lib/api';
 
-function preview(device: DiscoveredDevice) {
+function preview(device: DiscoveredDevice, serial: string) {
   const name = device.sysName && device.sysName !== device.ip ? device.sysName : device.ip;
   const detail = [device.ip, device.sysLocation].filter(Boolean).join(' · ');
-  const software = (device.sysDescr || '').split('\n')[0].trim();
-  return { name, detail, software };
+  const software = serial ? '' : (device.sysDescr || '').split('\n')[0].trim();
+  return { name, detail, software, serial };
 }
 
 export function GlobalSearch() {
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
+  const [serials, setSerials] = useState<SerialRow[]>([]);
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
 
@@ -21,10 +22,15 @@ export function GlobalSearch() {
     let cancel = false;
     async function pull() {
       try {
-        const data = await fetchDiscoveryResults();
-        if (!cancel) setDevices(data.results || []);
+        const [data, catalog] = await Promise.all([fetchDiscoveryResults(), fetchCatalogSerials()]);
+        if (cancel) return;
+        setDevices(data.results || []);
+        setSerials(catalog.serials || []);
       } catch {
-        if (!cancel) setDevices([]);
+        if (!cancel) {
+          setDevices([]);
+          setSerials([]);
+        }
       }
     }
     pull();
@@ -45,14 +51,21 @@ export function GlobalSearch() {
   }, [open]);
 
   const needle = query.trim().toLowerCase();
-  const matches = needle
-    ? devices
-        .filter((device) => {
-          const haystack = [device.sysName, device.ip, device.sysLocation, device.sysDescr].join(' ').toLowerCase();
-          return haystack.includes(needle);
-        })
-        .slice(0, 8)
-    : [];
+  const matches = (() => {
+    if (!needle) return [];
+    const fromDevices = devices
+      .map((device) => {
+        const haystack = [device.sysName, device.ip, device.sysLocation, device.sysDescr].join(' ').toLowerCase();
+        const serial = serials.find((row) => row.ip === device.ip && row.serial.toLowerCase().includes(needle))?.serial || '';
+        return haystack.includes(needle) || serial ? { device, serial } : null;
+      })
+      .filter((item): item is { device: DiscoveredDevice; serial: string } => !!item);
+    const seen = new Set(fromDevices.map((item) => item.device.ip));
+    const extras = serials
+      .filter((row) => row.serial.toLowerCase().includes(needle) && !seen.has(row.ip))
+      .map((row) => ({ device: { ip: row.ip, sysName: row.name || row.ip }, serial: row.serial }));
+    return [...fromDevices, ...extras].slice(0, 8);
+  })();
 
   function go(ip: string) {
     setQuery('');
@@ -76,7 +89,7 @@ export function GlobalSearch() {
           if (event.key === 'Escape') setOpen(false);
           if (event.key === 'Enter' && matches[0]) {
             event.preventDefault();
-            go(matches[0].ip);
+            go(matches[0].device.ip);
           }
         }}
         className="h-10 w-full rounded-lg border border-line bg-surface pl-8 pr-3 text-sm text-fg outline-none placeholder:text-faint"
@@ -87,8 +100,8 @@ export function GlobalSearch() {
             <p className="px-3 py-3 text-sm text-muted">No devices</p>
           ) : (
             <ul>
-              {matches.map((device) => {
-                const item = preview(device);
+              {matches.map(({ device, serial }) => {
+                const item = preview(device, serial);
                 return (
                   <li key={device.ip}>
                     <button
@@ -98,6 +111,7 @@ export function GlobalSearch() {
                     >
                       <span className="max-w-full truncate font-mono text-sm">{item.name}</span>
                       <span className="max-w-full truncate text-xs text-muted">{item.detail}</span>
+                      {item.serial ? <span className="max-w-full truncate font-mono text-xs text-faint">Serial {item.serial}</span> : null}
                       {item.software ? <span className="max-w-full truncate text-xs text-faint">{item.software}</span> : null}
                     </button>
                   </li>

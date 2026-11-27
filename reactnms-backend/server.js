@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import crypto from 'node:crypto';
 import snmp from 'net-snmp';
 import cron from 'node-cron';
 import IPCIDR from 'ip-cidr';
@@ -15,7 +16,12 @@ import { createEventStore, interfaceTitle } from './lib/device-events.js';
 import { createPollStats } from './lib/poll-stats.js';
 import { createSyslogStore, normalizeSyslogConfig, parseSyslog } from './lib/syslog.js';
 import { decryptSecret, encryptSecret, loadKey, normalizeServiceAccount, publicServiceAccount } from './lib/secret-box.js';
-import { DEVICE_TYPES, normalizeDeviceType, runBackup } from './lib/config-backup.js';
+import { DEVICE_TYPES, deviceTypeFromDescr, normalizeDeviceType, runBackup } from './lib/config-backup.js';
+import { createCatalog } from './lib/catalog.js';
+import { classifyEvents, interfaceErrorRows } from './lib/device-errors.js';
+import { JUNIPER_DOM_COLUMNS, JUNIPER_DOM_TABLE, SENSOR_COLUMNS, SENSOR_TABLE, juniperOptics, pairOptics } from './lib/optics.js';
+import { codeChallenge, createAuthStore, normalizeAuth, publicAuth, ssoName, verifyIdToken } from './lib/auth.js';
+import { authenticateDirectory } from './lib/ldap-client.js';
 import {
   CIDR_ROUTE_COLUMNS,
   CIDR_ROUTE_TABLE,
@@ -46,8 +52,57 @@ import {
 } from './lib/device-mibs.js';
 
 const app = express();
-app.use(cors());
+app.set('trust proxy', 1);
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '2mb' }));
+
+let authStore = null;
+
+function authMode() {
+  return discoveryConfig.auth?.mode || 'off';
+}
+
+function readSessionToken(req) {
+  const raw = String(req.headers.cookie || '');
+  const match = raw.match(/(?:^|;\s*)reactnms_session=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+function requestIsSecure(req) {
+  if (req.secure) return true;
+  return String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+}
+
+function sessionCookie(req, token, clear = false) {
+  const parts = [
+    `reactnms_session=${clear ? '' : encodeURIComponent(token)}`,
+    'HttpOnly',
+    'SameSite=Lax',
+    'Path=/',
+    `Max-Age=${clear ? 0 : 43200}`,
+  ];
+  if (requestIsSecure(req)) parts.push('Secure');
+  return parts.join('; ');
+}
+
+const PUBLIC_API = new Set([
+  'GET /api/health',
+  'GET /api/auth/config',
+  'GET /api/auth/session',
+  'POST /api/auth/login',
+  'POST /api/auth/logout',
+  'GET /api/auth/sso/start',
+  'GET /api/auth/sso/callback',
+]);
+
+app.use((req, res, next) => {
+  if (authMode() === 'off') return next();
+  if (PUBLIC_API.has(`${req.method} ${req.path}`)) return next();
+  const user = authStore?.sessionUser(readSessionToken(req));
+  if (!user) return res.status(401).json({ error: 'Sign in required' });
+  req.user = user;
+  next();
+});
 
 const PORT = process.env.PORT || 3001;
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -69,6 +124,7 @@ let discoveryConfig = {
   backupSchedule: { enabled: false, cron: '0 2 * * *', lastRun: null, lastError: '' },
   syslog: { enabled: false, port: 5514, retainDays: 14, maxRows: 100000 },
   deviceCli: {},
+  auth: { mode: 'off', ad: { url: '', domain: '' }, ldap: { url: '', baseDn: '', userFilter: '(uid={{username}})', bindDn: '', bindPasswordEnc: '' }, sso: { issuer: '', clientId: '', clientSecretEnc: '', redirectUri: '' } },
   lastRun: null,
   results: [],
 };
@@ -104,6 +160,7 @@ discoveryConfig.serviceAccount = normalizeServiceAccount(
   normalizeDeviceType(discoveryConfig.serviceAccount?.deviceType) || 'cisco_ios',
 );
 discoveryConfig.syslog = normalizeSyslogConfig(discoveryConfig.syslog);
+discoveryConfig.auth = normalizeAuth(discoveryConfig.auth);
 discoveryConfig.backupSchedule = {
   enabled: !!discoveryConfig.backupSchedule?.enabled,
   cron: String(discoveryConfig.backupSchedule?.cron || '0 2 * * *').trim() || '0 2 * * *',
@@ -128,12 +185,13 @@ function serviceAccountView() {
 }
 
 function publicConfig(extra = {}) {
-  const { results, serviceAccount, ...rest } = discoveryConfig;
+  const { results, serviceAccount, auth, ...rest } = discoveryConfig;
   return {
     ...rest,
     interfaceIgnore: ignorePatterns(),
     serviceAccount: serviceAccountView(),
     syslog: syslogView(),
+    auth: publicAuth(auth),
     ...extra,
   };
 }
@@ -368,10 +426,17 @@ function hostnameOf(ip) {
   return found?.sysName || '';
 }
 
+function descrOf(ip) {
+  const found = (discoveryConfig.results || []).find((device) => device.ip === ip || (device.addresses || []).includes(ip));
+  return found?.sysDescr || '';
+}
+
+function chassisFirst(rows) {
+  return [...(rows || [])].sort((a, b) => Number(b.classId === 3) - Number(a.classId === 3));
+}
+
 function cliTypeFor(ip) {
-  return normalizeDeviceType(discoveryConfig.deviceCli?.[ip])
-    || normalizeDeviceType(discoveryConfig.serviceAccount?.deviceType)
-    || 'cisco_ios';
+  return normalizeDeviceType(discoveryConfig.deviceCli?.[ip]) || deviceTypeFromDescr(descrOf(ip));
 }
 
 const IF_TABLE = '1.3.6.1.2.1.2.2';
@@ -975,6 +1040,8 @@ const alertStore = createAlertStore(db);
 const eventStore = createEventStore(db);
 const pollStats = createPollStats(db);
 const syslogStore = createSyslogStore(db);
+const catalog = createCatalog(db);
+authStore = createAuthStore(db);
 const secretKey = loadKey(path.join(DATA_DIR, 'service.key'));
 db.exec(`
   CREATE TABLE IF NOT EXISTS device_config (
@@ -1091,17 +1158,24 @@ app.get('/api/devices/:ip/settings', (req, res) => {
     credentialName: ref.name || '',
     credentials: credentialChoices(),
     poll: pollStats.device(ip),
-    deviceType: cliTypeFor(ip),
+    deviceType: normalizeDeviceType(discoveryConfig.deviceCli?.[ip]) || '',
+    detectedType: deviceTypeFromDescr(descrOf(ip)),
     deviceTypes: DEVICE_TYPES,
   });
 });
 
 app.post('/api/devices/:ip/cli', (req, res) => {
-  const type = normalizeDeviceType(req.body?.deviceType);
+  const raw = String(req.body?.deviceType || '').trim();
+  if (!raw || raw === 'auto') {
+    delete discoveryConfig.deviceCli[req.params.ip];
+    saveConfig();
+    return res.json({ ok: true, deviceType: '', detectedType: deviceTypeFromDescr(descrOf(req.params.ip)) });
+  }
+  const type = normalizeDeviceType(raw);
   if (!type) return res.status(400).json({ error: 'Choose a Netmiko device type' });
   discoveryConfig.deviceCli[req.params.ip] = type;
   saveConfig();
-  res.json({ ok: true, deviceType: type });
+  res.json({ ok: true, deviceType: type, detectedType: deviceTypeFromDescr(descrOf(req.params.ip)) });
 });
 
 app.post('/api/devices/:ip/credential', (req, res) => {
@@ -1577,6 +1651,7 @@ app.get('/api/devices/:ip', async (req, res) => {
         aliasKnown: read.aliasOk,
         router,
         configEnabled: !!discoveryConfig.serviceAccount?.enabled,
+        serials: catalog.serialsFor(ip).map((row) => row.serial).filter(Boolean).join(', '),
         ...sys,
         interfaces,
       });
@@ -1859,8 +1934,7 @@ function backupScheduleView() {
 app.post('/api/settings/service-account', (req, res) => {
   const body = req.body || {};
   const current = discoveryConfig.serviceAccount || {};
-  const deviceType = normalizeDeviceType(body.deviceType);
-  if (!deviceType) return res.status(400).json({ error: 'Choose a device type' });
+  const deviceType = normalizeDeviceType(body.deviceType) || normalizeDeviceType(current.deviceType) || 'cisco_ios';
   let passwordEnc = current.passwordEnc || '';
   let enableEnc = current.enableEnc || '';
   if (typeof body.password === 'string' && body.password !== '') passwordEnc = encryptSecret(secretKey, body.password);
@@ -2019,6 +2093,7 @@ app.get('/api/devices/:ip/routing', async (req, res) => {
 app.get('/api/devices/:ip/vlans', async (req, res) => {
   try {
     const body = await walkDevice(req.params.ip, 20000, (session) => readVlans(session), manualSnmp);
+    if (body.ok) catalog.saveVlans(req.params.ip, body.vlans);
     res.json(body);
   } catch (err) {
     res.status(502).json({ ok: false, vlans: [], error: safeError(err) });
@@ -2061,6 +2136,7 @@ app.get('/api/devices/:ip/inventory', async (req, res) => {
         error: result.ok ? '' : 'SNMP timeout or the entity table is unavailable',
       };
     }, manualSnmp);
+    if (body.ok) catalog.saveSerials(req.params.ip, chassisFirst(body.rows));
     res.json(body);
   } catch (err) {
     res.status(502).json({ ok: false, rows: [], error: safeError(err) });
@@ -2116,6 +2192,17 @@ async function storeBackup(ip) {
       return { status: 500, ok: false, error: 'The stored service account password could not be read', body: '', savedAt: null, deviceType: '' };
     }
     const deviceType = cliTypeFor(ip);
+    if (!deviceType) {
+      return {
+        status: 200,
+        ok: false,
+        error: 'Could not detect a device type from the operating system. Set the type on this device.',
+        body: '',
+        savedAt: null,
+        deviceType: '',
+        enabled: true,
+      };
+    }
     const result = await runBackup({ host: ip, username: account.username, password, enable, deviceType });
     const savedAt = Date.now();
     const previous = db.prepare('SELECT body FROM device_config WHERE ip = ?').get(ip);
@@ -2261,6 +2348,381 @@ function bindSyslog() {
     }
   }));
 }
+
+function deviceRecord(ip) {
+  return (discoveryConfig.results || []).find((device) => device.ip === ip) || null;
+}
+
+app.get('/api/catalog/serials', (_req, res) => {
+  res.json({ serials: catalog.allSerials() });
+});
+
+app.get('/api/devices/:ip/serials', async (req, res) => {
+  const ip = req.params.ip;
+  const stamp = catalog.seen(ip);
+  const cached = catalog.serialsFor(ip);
+  const fresh = stamp.serialAt && Date.now() - stamp.serialAt < 6 * 3600 * 1000;
+  if (fresh) return res.json({ serials: cached, cached: true });
+  try {
+    const body = await walkDevice(ip, 12000, async (session) => {
+      const result = await readTableColumns(session, ENTITY_TABLE, [5, 7, 11, 13], 6000, 80);
+      return { ok: result.ok, rows: result.ok ? parseInventory(result.table) : [] };
+    }, manualSnmp);
+    if (body.ok) catalog.saveSerials(ip, chassisFirst(body.rows));
+    res.json({ serials: catalog.serialsFor(ip), cached: false });
+  } catch (err) {
+    res.json({ serials: cached, cached: true, error: safeError(err) });
+  }
+});
+
+app.get('/api/devices/:ip/errors', async (req, res) => {
+  const ip = req.params.ip;
+  const device = deviceRecord(ip);
+  const grouped = classifyEvents(eventStore.list({ device: ip, limit: 400 }));
+  const syslog = syslogStore.forDevice({
+    ips: [ip, ...(device?.addresses || [])],
+    hostname: device?.sysName || '',
+    limit: 200,
+  }).filter((row) => row.severity <= 3);
+  let interfaces = [];
+  let error = '';
+  try {
+    const body = await walkDevice(ip, 8000, async (session) => {
+      const result = await readTableColumns(session, IF_TABLE, [2, 13, 14, 19, 20], 4000, 512);
+      return { ok: result.ok, rows: result.ok ? interfaceErrorRows(result.table) : [] };
+    }, manualSnmp);
+    interfaces = body.rows;
+    if (!body.ok) error = 'Interface counters were not readable';
+  } catch (err) {
+    error = safeError(err);
+  }
+  res.json({ interfaces, syslog, ...grouped, error });
+});
+
+function columnText(row, column) {
+  return snmpText(row?.[column] ?? row?.[String(column)]);
+}
+
+app.get('/api/devices/:ip/optics', async (req, res) => {
+  const ip = req.params.ip;
+  try {
+    const body = await walkDevice(ip, 15000, async (session) => {
+      const entity = await readTableColumns(session, ENTITY_TABLE, [7], 4000, 300);
+      const entityNames = {};
+      if (entity.ok) {
+        for (const [index, row] of Object.entries(entity.table)) entityNames[index] = columnText(row, 7);
+      }
+      const sensors = await readTableColumns(session, SENSOR_TABLE, SENSOR_COLUMNS, 5000, 400);
+      let optics = sensors.ok ? pairOptics(entityNames, sensors.table) : [];
+      let responded = sensors.ok;
+      if (!optics.length) {
+        const ifs = await readTableColumns(session, IF_TABLE, [2], 4000, 256);
+        const ifNames = {};
+        if (ifs.ok) {
+          for (const [index, row] of Object.entries(ifs.table)) ifNames[index] = columnText(row, 2);
+        }
+        const dom = await readTableColumns(session, JUNIPER_DOM_TABLE, JUNIPER_DOM_COLUMNS, 5000, 200);
+        responded = responded || dom.ok || ifs.ok;
+        if (dom.ok) optics = juniperOptics(dom.table, ifNames);
+      }
+      return { ok: responded, optics };
+    }, manualSnmp);
+    if (body.optics.length) catalog.recordOptics(ip, body.optics);
+    res.json({
+      detected: body.optics.length > 0,
+      optics: body.optics,
+      history: catalog.opticHistory(ip),
+      error: body.ok || body.optics.length ? '' : 'No optical sensors responded',
+    });
+  } catch (err) {
+    res.status(502).json({ detected: false, optics: [], history: [], error: safeError(err) });
+  }
+});
+
+app.get('/api/network-search', (req, res) => {
+  const kind = ['vlan', 'ip', 'serial'].includes(req.query.kind) ? req.query.kind : 'ip';
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.json({ kind, rows: [], catalogEmpty: false });
+  if (kind === 'vlan') {
+    const counts = catalog.counts();
+    const rows = catalog.searchVlan(q).map((row) => {
+      const device = deviceRecord(row.ip);
+      return { ...row, hostname: device?.sysName || '', location: device?.sysLocation || '' };
+    });
+    return res.json({ kind, rows, catalogEmpty: counts.vlans === 0 });
+  }
+  if (kind === 'serial') {
+    const counts = catalog.counts();
+    const rows = catalog.searchSerial(q).map((row) => {
+      const device = deviceRecord(row.ip);
+      return { ...row, hostname: device?.sysName || row.name || '' };
+    });
+    return res.json({ kind, rows, catalogEmpty: counts.serials === 0 });
+  }
+  const needle = q.toLowerCase();
+  const rows = [];
+  for (const device of discoveryConfig.results || []) {
+    const addresses = [device.ip, ...(device.addresses || [])].filter(Boolean);
+    const match = addresses.find((address) => String(address).toLowerCase().includes(needle));
+    if (!match) continue;
+    rows.push({ ip: device.ip, hostname: device.sysName || '', match, location: device.sysLocation || '' });
+    if (rows.length >= 200) break;
+  }
+  res.json({ kind: 'ip', rows, catalogEmpty: false });
+});
+
+app.get('/api/syslog', (req, res) => {
+  res.json({
+    status: syslogStatus,
+    enabled: !!discoveryConfig.syslog?.enabled,
+    rows: syslogStore.list({ q: req.query.q || '', severity: req.query.severity || '', limit: req.query.limit || 200 }),
+  });
+});
+
+app.get('/api/auth/config', (_req, res) => {
+  res.json(publicAuth(discoveryConfig.auth));
+});
+
+app.get('/api/auth/session', (req, res) => {
+  if (authMode() === 'off') return res.json({ mode: 'off', username: '' });
+  const user = authStore.sessionUser(readSessionToken(req));
+  if (!user) return res.status(401).json({ error: 'Sign in required' });
+  res.json({ mode: authMode(), username: user.username });
+});
+
+app.get('/api/auth/users', (_req, res) => {
+  res.json({ users: authStore.listUsers() });
+});
+
+app.post('/api/auth/users', (req, res) => {
+  try {
+    const result = authStore.addUser(req.body?.username, req.body?.password);
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    res.json({ ok: true, username: result.username });
+  } catch (err) {
+    const duplicate = String(err?.message || '').includes('UNIQUE');
+    res.status(400).json({ error: duplicate ? 'That username already exists' : 'Could not create the user' });
+  }
+});
+
+app.delete('/api/auth/users/:username', (req, res) => {
+  const name = String(req.params.username || '');
+  if (authMode() === 'local' && authStore.listUsers().filter((user) => user.username !== name).length === 0) {
+    return res.status(400).json({ error: 'Keep at least one local user while local authentication is on' });
+  }
+  authStore.deleteUser(name);
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const mode = authMode();
+  if (mode === 'off') return res.status(400).json({ error: 'Authentication is off' });
+  if (mode === 'sso') return res.status(400).json({ error: 'This site uses single sign-on' });
+  const username = String(req.body?.username || '');
+  const password = String(req.body?.password || '');
+  if (mode === 'local') {
+    const session = authStore.loginLocal(username, password);
+    if (!session) return res.status(401).json({ error: 'Username or password was rejected' });
+    res.setHeader('Set-Cookie', sessionCookie(req, session.token));
+    return res.json({ ok: true, username: session.username, mode });
+  }
+  const cfg = normalizeAuth(discoveryConfig.auth);
+  let bindPassword = '';
+  try {
+    if (mode === 'ldap' && cfg.ldap.bindPasswordEnc) bindPassword = decryptSecret(secretKey, cfg.ldap.bindPasswordEnc);
+  } catch {
+    return res.status(500).json({ error: 'The directory bind password could not be read' });
+  }
+  const result = await authenticateDirectory({
+    url: mode === 'ad' ? cfg.ad.url : cfg.ldap.url,
+    username,
+    password,
+    mode,
+    domain: cfg.ad.domain,
+    baseDn: cfg.ldap.baseDn,
+    userFilter: cfg.ldap.userFilter,
+    bindDn: cfg.ldap.bindDn,
+    bindPassword,
+  });
+  if (!result.ok) return res.status(401).json({ error: result.error || 'Directory login was rejected' });
+  const session = authStore.openSession(result.name || username);
+  res.setHeader('Set-Cookie', sessionCookie(req, session.token));
+  res.json({ ok: true, username: session.username, mode });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  authStore.endSession(readSessionToken(req));
+  res.setHeader('Set-Cookie', sessionCookie(req, '', true));
+  res.json({ ok: true });
+});
+
+function safeRedirect(next) {
+  const text = String(next || '');
+  if (text.startsWith('/') && !text.startsWith('//')) return text;
+  try {
+    const url = new URL(text);
+    if (url.protocol === 'https:' || url.protocol === 'http:') return url.toString();
+  } catch { /* reject unexpected targets */ }
+  return '/';
+}
+
+function ssoReturnUrl(req) {
+  let origin = '';
+  try {
+    if (req.get('referer')) origin = new URL(req.get('referer')).origin;
+  } catch { /* ignore a bad referer */ }
+  const requested = String(req.query.next || '');
+  if (requested.startsWith('/') && !requested.startsWith('//')) return origin ? `${origin}${requested}` : requested;
+  return origin ? `${origin}/` : '/';
+}
+
+app.get('/api/auth/sso/start', async (req, res) => {
+  const sso = normalizeAuth(discoveryConfig.auth).sso;
+  if (authMode() !== 'sso' || !sso.issuer || !sso.clientId || !sso.redirectUri) {
+    return res.status(400).json({ error: 'Single sign-on is not configured' });
+  }
+  try {
+    const discovery = await fetch(`${sso.issuer}/.well-known/openid-configuration`);
+    if (!discovery.ok) return res.status(502).json({ error: 'Could not read the SSO discovery document' });
+    const doc = await discovery.json();
+    if (!doc.authorization_endpoint) return res.status(502).json({ error: 'SSO discovery did not include an authorization endpoint' });
+    const verifier = crypto.randomBytes(32).toString('base64url');
+    const state = authStore.saveState(verifier, ssoReturnUrl(req));
+    const params = new URLSearchParams({
+      response_type: 'code',
+      client_id: sso.clientId,
+      redirect_uri: sso.redirectUri,
+      scope: 'openid profile email',
+      state,
+      code_challenge: codeChallenge(verifier),
+      code_challenge_method: 'S256',
+    });
+    res.redirect(`${doc.authorization_endpoint}?${params}`);
+  } catch {
+    res.status(502).json({ error: 'Could not start single sign-on' });
+  }
+});
+
+app.get('/api/auth/sso/callback', async (req, res) => {
+  const sso = normalizeAuth(discoveryConfig.auth).sso;
+  const pending = authStore.takeState(String(req.query.state || ''));
+  if (!pending?.verifier) return res.status(400).send('Sign-in state was missing or expired');
+  if (!req.query.code) return res.status(400).send('Sign-in did not return a code');
+  try {
+    const discovery = await fetch(`${sso.issuer}/.well-known/openid-configuration`);
+    if (!discovery.ok) return res.status(502).send('Could not read the SSO discovery document');
+    const doc = await discovery.json();
+    const secret = sso.clientSecretEnc ? decryptSecret(secretKey, sso.clientSecretEnc) : '';
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: String(req.query.code),
+      redirect_uri: sso.redirectUri,
+      client_id: sso.clientId,
+      code_verifier: pending.verifier,
+    });
+    const headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+    if (secret) headers.Authorization = `Basic ${Buffer.from(`${sso.clientId}:${secret}`).toString('base64')}`;
+    const tokenRes = await fetch(doc.token_endpoint, { method: 'POST', headers, body });
+    if (!tokenRes.ok) return res.status(401).send('Single sign-on rejected the code');
+    const tokens = await tokenRes.json();
+    const jwksRes = await fetch(doc.jwks_uri);
+    if (!jwksRes.ok) return res.status(502).send('Could not read the SSO signing keys');
+    const payload = verifyIdToken(tokens.id_token, await jwksRes.json(), { issuer: doc.issuer || sso.issuer, audience: sso.clientId });
+    let name = ssoName(payload);
+    if (tokens.access_token && doc.userinfo_endpoint) {
+      const infoRes = await fetch(doc.userinfo_endpoint, { headers: { Authorization: `Bearer ${tokens.access_token}` } });
+      if (infoRes.ok) name = ssoName(await infoRes.json()) || name;
+    }
+    if (!name) return res.status(401).send('Single sign-on did not return a username');
+    const session = authStore.openSession(name);
+    res.setHeader('Set-Cookie', sessionCookie(req, session.token));
+    res.redirect(safeRedirect(pending.next));
+  } catch {
+    res.status(401).send('Single sign-on failed');
+  }
+});
+
+app.post('/api/settings/auth', (req, res) => {
+  const body = req.body || {};
+  const current = normalizeAuth(discoveryConfig.auth);
+  const mode = ['off', 'local', 'ad', 'ldap', 'sso'].includes(body.mode) ? body.mode : current.mode;
+  if (mode === 'local' && authStore.listUsers().length === 0) {
+    return res.status(400).json({ error: 'Create a local user first' });
+  }
+  let bindPasswordEnc = current.ldap.bindPasswordEnc;
+  if (body.ldap?.clearPassword) bindPasswordEnc = '';
+  else if (typeof body.ldap?.bindPassword === 'string' && body.ldap.bindPassword) bindPasswordEnc = encryptSecret(secretKey, body.ldap.bindPassword);
+  let clientSecretEnc = current.sso.clientSecretEnc;
+  if (body.sso?.clearSecret) clientSecretEnc = '';
+  else if (typeof body.sso?.clientSecret === 'string' && body.sso.clientSecret) clientSecretEnc = encryptSecret(secretKey, body.sso.clientSecret);
+  discoveryConfig.auth = normalizeAuth({
+    mode,
+    ad: { url: body.ad?.url ?? current.ad.url, domain: body.ad?.domain ?? current.ad.domain },
+    ldap: {
+      url: body.ldap?.url ?? current.ldap.url,
+      baseDn: body.ldap?.baseDn ?? current.ldap.baseDn,
+      userFilter: body.ldap?.userFilter ?? current.ldap.userFilter,
+      bindDn: body.ldap?.bindDn ?? current.ldap.bindDn,
+      bindPasswordEnc,
+    },
+    sso: {
+      issuer: body.sso?.issuer ?? current.sso.issuer,
+      clientId: body.sso?.clientId ?? current.sso.clientId,
+      redirectUri: body.sso?.redirectUri ?? current.sso.redirectUri,
+      clientSecretEnc,
+    },
+  });
+  saveConfig();
+  res.json(publicAuth(discoveryConfig.auth));
+});
+
+const CATALOG_STALE_MS = 6 * 3600 * 1000;
+let catalogSampling = false;
+
+function nextCatalogIp() {
+  let best = '';
+  let oldest = Infinity;
+  for (const device of discoveryConfig.results || []) {
+    if (!device?.ip) continue;
+    const stamp = catalog.seen(device.ip);
+    const at = Math.min(stamp.serialAt || 0, stamp.vlanAt || 0);
+    if (at < oldest) {
+      oldest = at;
+      best = device.ip;
+    }
+  }
+  return best;
+}
+
+async function sampleCatalogDevice(ip) {
+  const stamp = catalog.seen(ip);
+  const now = Date.now();
+  const needSerial = !stamp.serialAt || now - stamp.serialAt > CATALOG_STALE_MS;
+  const needVlan = !stamp.vlanAt || now - stamp.vlanAt > CATALOG_STALE_MS;
+  if (!needSerial && !needVlan) return;
+  await walkDevice(ip, 14000, async (session) => {
+    if (needSerial) {
+      const result = await readTableColumns(session, ENTITY_TABLE, [5, 7, 11, 13], 6000, 80);
+      if (result.ok) catalog.saveSerials(ip, chassisFirst(parseInventory(result.table)));
+    }
+    if (needVlan) {
+      const body = await readVlans(session);
+      if (body.ok) catalog.saveVlans(ip, body.vlans);
+    }
+  }, manualSnmp);
+}
+
+setInterval(() => {
+  if (catalogSampling) return;
+  const ip = nextCatalogIp();
+  if (!ip) return;
+  catalogSampling = true;
+  sampleCatalogDevice(ip)
+    .catch((err) => console.error('catalog sample failed', err.message))
+    .finally(() => {
+      catalogSampling = false;
+    });
+}, 60000);
 
 // Keep existing health
 app.get('/api/health', (_req, res) => {

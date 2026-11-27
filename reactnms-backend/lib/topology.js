@@ -197,10 +197,10 @@ export function coreView(sites, links, selectedName, coreName) {
     if (devices.length) shown.push({ ...site, devices });
   }
   shown.sort((a, b) => {
-    if (a.name === selectedName) return -1;
-    if (b.name === selectedName) return 1;
-    if (a.name === coreName) return 1;
-    if (b.name === coreName) return -1;
+    if (a.name === coreName) return -1;
+    if (b.name === coreName) return 1;
+    if (a.name === selectedName) return 1;
+    if (b.name === selectedName) return -1;
     return a.name.localeCompare(b.name);
   });
   return {

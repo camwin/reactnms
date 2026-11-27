@@ -13,35 +13,46 @@ function shortName(device: DiscoveredDevice) {
 }
 
 function layoutMap(view: TopologyView) {
-  const colW = 230;
-  const rowH = 76;
-  const padX = 36;
-  const padTop = 46;
-  const gap = 20;
-  let width = 760;
-  let cursor = 16;
-  const frames: { site: string; x: number; y: number; w: number; h: number }[] = [];
-  const nodes: { device: DiscoveredDevice; x: number; y: number; label: string }[] = [];
+  const colW = 200;
+  const rowH = 64;
+  const padX = 28;
+  const padTop = 40;
+  const gap = 16;
+  const built: { site: string; w: number; h: number; nodes: { device: DiscoveredDevice; x: number; y: number; label: string }[] }[] = [];
+  let maxW = 560;
 
   for (const site of view.sites) {
     const list = site.devices;
     const cols = Math.min(4, Math.max(1, list.length));
     const rows = Math.ceil(list.length / cols);
-    const w = Math.max(320, padX * 2 + cols * colW);
-    const h = padTop + rows * rowH + 16;
-    width = Math.max(width, w + 32);
-    frames.push({ site: site.name, x: 16, y: cursor, w, h });
+    const w = Math.max(280, padX * 2 + cols * colW);
+    const h = padTop + rows * rowH + 12;
+    maxW = Math.max(maxW, w);
+    const local: { device: DiscoveredDevice; x: number; y: number; label: string }[] = [];
     list.forEach((device, index) => {
       const col = index % cols;
       const row = Math.floor(index / cols);
-      nodes.push({
+      local.push({
         device,
-        x: 16 + padX + col * colW + 26,
-        y: cursor + padTop + row * rowH + 22,
+        x: padX + col * colW + 22,
+        y: padTop + row * rowH + 18,
         label: shortName(device),
       });
     });
-    cursor += h + gap;
+    built.push({ site: site.name, w, h, nodes: local });
+  }
+
+  const canvas = maxW + 48;
+  let cursor = 20;
+  const frames: { site: string; x: number; y: number; w: number; h: number }[] = [];
+  const nodes: { device: DiscoveredDevice; x: number; y: number; label: string }[] = [];
+  for (const site of built) {
+    const x = (canvas - site.w) / 2;
+    frames.push({ site: site.site, x, y: cursor, w: site.w, h: site.h });
+    for (const node of site.nodes) {
+      nodes.push({ ...node, x: x + node.x, y: cursor + node.y });
+    }
+    cursor += site.h + gap;
   }
 
   const at = new Map(nodes.map((node) => [node.device.ip, node]));
@@ -52,7 +63,19 @@ function layoutMap(view: TopologyView) {
     return [{ ...link, x1: from.x, y1: from.y, x2: to.x, y2: to.y }];
   });
 
-  return { frames, nodes, lines, width, height: Math.max(240, cursor) };
+  const contentWidth = canvas;
+  const contentHeight = Math.max(220, cursor);
+  const zoom = 0.08;
+  const marginX = Math.round(contentWidth * zoom);
+  const marginY = Math.round(contentHeight * zoom);
+  const shift = <T extends { x: number; y: number }>(item: T): T => ({ ...item, x: item.x + marginX, y: item.y + marginY });
+  return {
+    frames: frames.map(shift),
+    nodes: nodes.map(shift),
+    lines: lines.map((line) => ({ ...line, x1: line.x1 + marginX, y1: line.y1 + marginY, x2: line.x2 + marginX, y2: line.y2 + marginY })),
+    width: contentWidth + marginX * 2,
+    height: contentHeight + marginY * 2,
+  };
 }
 
 const ALL = '__all__';
@@ -166,7 +189,7 @@ export default function Topology() {
           <div className="max-h-[70vh] overflow-auto">
             <svg
               viewBox={`0 0 ${map.width} ${map.height}`}
-              className="h-auto w-full min-w-[720px]"
+              className="h-auto w-full"
               role="group"
               aria-label="Sites and neighbor links"
             >

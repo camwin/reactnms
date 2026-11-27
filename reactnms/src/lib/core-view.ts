@@ -8,6 +8,7 @@ function internalLinks<L extends LinkLike>(sites: SiteLike[], links: L[]) {
 
 // Selected site shows its devices. The core shows only itself. Any other
 // site shows its devices plus the shortest neighbor path to the core.
+// The core location is ordered first so the map can draw it on top.
 export function coreView<S extends SiteLike, L extends LinkLike>(sites: S[], links: L[], selectedName: string, coreName: string) {
   const selected = (sites || []).find((site) => site.name === selectedName);
   if (!selected) return { sites: [] as S[], links: [] as L[], note: '' };
@@ -64,10 +65,10 @@ export function coreView<S extends SiteLike, L extends LinkLike>(sites: S[], lin
     if (devices.length) shown.push({ ...site, devices });
   }
   shown.sort((a, b) => {
-    if (a.name === selectedName) return -1;
-    if (b.name === selectedName) return 1;
-    if (a.name === coreName) return 1;
-    if (b.name === coreName) return -1;
+    if (a.name === coreName) return -1;
+    if (b.name === coreName) return 1;
+    if (a.name === selectedName) return 1;
+    if (b.name === selectedName) return -1;
     return a.name.localeCompare(b.name);
   });
   return {

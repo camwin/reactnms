@@ -27,10 +27,23 @@ async function errorMessage(res: Response) {
   return text;
 }
 
+function redirectToLogin() {
+  if (typeof window === 'undefined' || window.location.pathname.startsWith('/login')) return;
+  const next = `${window.location.pathname}${window.location.search}`;
+  window.location.assign(`/login?next=${encodeURIComponent(next)}`);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${apiBase()}${path}`, init);
+  const res = await fetch(`${apiBase()}${path}`, { ...init, credentials: 'include' });
+  if (res.status === 401 && !path.startsWith('/api/auth/login') && !path.startsWith('/api/auth/config') && !path.startsWith('/api/auth/session')) {
+    redirectToLogin();
+  }
   if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
   return res.json() as Promise<T>;
+}
+
+export function apiUrl(path: string) {
+  return `${apiBase()}${path}`;
 }
 
 function jsonInit(method: string, body: unknown): RequestInit {
@@ -156,6 +169,29 @@ export type SyslogConfig = {
   status?: string;
 };
 
+export type AuthPublic = {
+  mode: 'off' | 'local' | 'ad' | 'ldap' | 'sso' | string;
+  ad: { url: string; domain: string };
+  ldap: { url: string; baseDn: string; userFilter: string; bindDn: string; passwordSet: boolean };
+  sso: { issuer: string; clientId: string; redirectUri: string; secretSet: boolean };
+};
+
+export type AuthUser = { username: string; createdAt: number };
+
+export type SerialRow = { ip: string; serial: string; name: string; model: string };
+
+export type NetworkSearchRow = {
+  ip: string;
+  hostname?: string;
+  location?: string;
+  match?: string;
+  id?: string;
+  name?: string;
+  source?: string;
+  serial?: string;
+  model?: string;
+};
+
 export type DiscoveryConfig = {
   subnets: string[];
   community: string;
@@ -166,6 +202,7 @@ export type DiscoveryConfig = {
   serviceAccount?: ServiceAccount;
   backupSchedule?: BackupSchedule;
   syslog?: SyslogConfig;
+  auth?: AuthPublic;
   ignoredRemoved?: number;
   lastRun: string | null;
   results?: DiscoveredDevice[];
@@ -309,6 +346,7 @@ export type DeviceCredentialSettings = {
   credentials: { id: string; name: string; version: string }[];
   poll?: DevicePollStat;
   deviceType?: string;
+  detectedType?: string;
   deviceTypes?: DeviceTypeChoice[];
 };
 
@@ -328,10 +366,33 @@ export type SyslogRow = {
   at: number;
   sourceIp: string;
   host: string;
+  severity: number;
   severityName: string;
   facilityName: string;
   message: string;
 };
+
+export type InterfaceErrorRow = {
+  index: string;
+  name: string;
+  inDiscards: number;
+  inErrors: number;
+  outDiscards: number;
+  outErrors: number;
+};
+
+export type DeviceErrors = {
+  interfaces: InterfaceErrorRow[];
+  syslog: SyslogRow[];
+  reachability: DeviceEvent[];
+  link: DeviceEvent[];
+  switching: DeviceEvent[];
+  error: string;
+};
+
+export type OpticReading = { name: string; rx: number | null; tx: number | null };
+export type OpticSample = { name: string; t: number; rx: number | null; tx: number | null };
+export type DeviceOptics = { detected: boolean; optics: OpticReading[]; history: OpticSample[]; error: string };
 export type DeviceLogs = { events: DeviceEvent[]; syslog: SyslogRow[] };
 export type DeviceConfigBackup = {
   enabled: boolean;
@@ -371,6 +432,7 @@ export type DevicePoll = {
   aliasKnown?: boolean;
   router?: boolean;
   configEnabled?: boolean;
+  serials?: string;
 };
 
 export type TrafficPoint = { t: number; in: number; out: number };
@@ -565,7 +627,6 @@ export function fetchPoller() {
 export function saveServiceAccount(body: {
   enabled: boolean;
   username: string;
-  deviceType: string;
   password?: string;
   enable?: string;
   clearEnable?: boolean;
@@ -579,7 +640,73 @@ export function saveSyslog(body: { enabled: boolean; port: number; retainDays: n
 }
 
 export function saveDeviceCli(ip: string, deviceType: string) {
-  return request<{ ok: boolean; deviceType: string }>(`/api/devices/${encodeURIComponent(ip)}/cli`, jsonInit('POST', { deviceType }));
+  return request<{ ok: boolean; deviceType: string; detectedType?: string }>(`/api/devices/${encodeURIComponent(ip)}/cli`, jsonInit('POST', { deviceType }));
+}
+
+export function fetchCatalogSerials() {
+  return request<{ serials: SerialRow[] }>('/api/catalog/serials');
+}
+
+export function fetchDeviceSerials(ip: string) {
+  return request<{ serials: { serial: string; name: string; model: string }[]; error?: string }>(`/api/devices/${encodeURIComponent(ip)}/serials`);
+}
+
+export function fetchDeviceErrors(ip: string) {
+  return request<DeviceErrors>(`/api/devices/${encodeURIComponent(ip)}/errors`);
+}
+
+export function fetchDeviceOptics(ip: string) {
+  return request<DeviceOptics>(`/api/devices/${encodeURIComponent(ip)}/optics`);
+}
+
+export function fetchNetworkSearch(kind: string, query: string) {
+  const params = new URLSearchParams({ kind, q: query });
+  return request<{ kind: string; rows: NetworkSearchRow[]; catalogEmpty: boolean }>(`/api/network-search?${params}`);
+}
+
+export function fetchSyslog(query = '', severity = '') {
+  const params = new URLSearchParams();
+  if (query) params.set('q', query);
+  if (severity) params.set('severity', severity);
+  const suffix = params.toString() ? `?${params}` : '';
+  return request<{ status: string; enabled: boolean; rows: SyslogRow[] }>(`/api/syslog${suffix}`);
+}
+
+export function fetchAuthConfig() {
+  return request<AuthPublic>('/api/auth/config');
+}
+
+export function fetchAuthSession() {
+  return request<{ mode: string; username: string }>('/api/auth/session');
+}
+
+export function login(username: string, password: string) {
+  return request<{ ok: boolean; username: string; mode: string }>('/api/auth/login', jsonInit('POST', { username, password }));
+}
+
+export function logout() {
+  return request<{ ok: boolean }>('/api/auth/logout', jsonInit('POST', {}));
+}
+
+export function fetchAuthUsers() {
+  return request<{ users: AuthUser[] }>('/api/auth/users');
+}
+
+export function createAuthUser(username: string, password: string) {
+  return request<{ ok: boolean; username: string }>('/api/auth/users', jsonInit('POST', { username, password }));
+}
+
+export function deleteAuthUser(username: string) {
+  return request<{ ok: boolean }>(`/api/auth/users/${encodeURIComponent(username)}`, { method: 'DELETE' });
+}
+
+export function saveAuthSettings(body: {
+  mode: string;
+  ad?: { url: string; domain: string };
+  ldap?: { url: string; baseDn: string; userFilter: string; bindDn: string; bindPassword?: string; clearPassword?: boolean };
+  sso?: { issuer: string; clientId: string; redirectUri: string; clientSecret?: string; clearSecret?: boolean };
+}) {
+  return request<AuthPublic>('/api/settings/auth', jsonInit('POST', body));
 }
 
 export function fetchDeviceRoutes(ip: string) {

@@ -22,6 +22,7 @@ import {
 import { formatDuration, formatEpoch } from '@/lib/format';
 
 const NONE = '__none__';
+const AUTO = '__auto__';
 
 export default function DeviceSettings() {
   const { ip } = useParams<{ ip: string }>();
@@ -38,8 +39,9 @@ export default function DeviceSettings() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [poll, setPoll] = useState<DevicePollStat | null>(null);
-  const [deviceType, setDeviceType] = useState('cisco_ios');
+  const [deviceType, setDeviceType] = useState(AUTO);
   const [customType, setCustomType] = useState('');
+  const [detectedType, setDetectedType] = useState('');
   const [deviceTypes, setDeviceTypes] = useState<DeviceTypeChoice[]>(DEVICE_TYPE_CHOICES);
 
   useEffect(() => {
@@ -60,8 +62,12 @@ export default function DeviceSettings() {
           const choices = settings.value.deviceTypes?.length ? settings.value.deviceTypes : DEVICE_TYPE_CHOICES;
           setDeviceTypes(choices);
           const typeIds = new Set(choices.map((item) => item.id).filter((id) => id !== 'other'));
-          const current = settings.value.deviceType || 'cisco_ios';
-          if (typeIds.has(current)) {
+          const current = settings.value.deviceType || '';
+          setDetectedType(settings.value.detectedType || '');
+          if (!current) {
+            setDeviceType(AUTO);
+            setCustomType('');
+          } else if (typeIds.has(current)) {
             setDeviceType(current);
             setCustomType('');
           } else {
@@ -219,14 +225,17 @@ export default function DeviceSettings() {
       <section className="rounded-xl border border-line bg-surface">
         <header className="border-b border-line px-4 py-3">
           <h2 className="font-mono text-xs uppercase tracking-widest text-faint">Config backup</h2>
-          <p className="mt-2 text-sm text-muted">Netmiko device type for this device. It overrides the service account default.</p>
+          <p className="mt-2 text-sm text-muted">
+            Detect from the operating system is the default. A saved type here overrides that detection.
+            {detectedType ? ` Detected ${detectedType}.` : ' No operating system match yet. Choose a type before backing up this device.'}
+          </p>
         </header>
         <div className="flex flex-wrap items-center gap-3 px-4 py-4">
           <Select
             ariaLabel="Device type"
             value={deviceType}
             onValueChange={setDeviceType}
-            options={deviceTypes.map((item) => ({ value: item.id, label: item.label }))}
+            options={[{ value: AUTO, label: 'Detect from operating system' }, ...deviceTypes.map((item) => ({ value: item.id, label: item.label }))]}
           />
           {deviceType === 'other' ? (
             <Input aria-label="Netmiko device type" placeholder="netmiko device_type" value={customType} onChange={(event) => setCustomType(event.target.value)} className="w-56 font-mono" />
@@ -235,11 +244,14 @@ export default function DeviceSettings() {
             tone="solid"
             disabled={saving}
             onClick={() => {
-              const next = deviceType === 'other' ? customType.trim() : deviceType;
+              const next = deviceType === AUTO ? 'auto' : deviceType === 'other' ? customType.trim() : deviceType;
               setSaving(true);
               setStatus('');
               saveDeviceCli(ip, next)
-                .then((saved) => setStatus(`Device type ${saved.deviceType}`))
+                .then((saved) => {
+                  if (saved.detectedType) setDetectedType(saved.detectedType);
+                  setStatus(saved.deviceType ? `Device type ${saved.deviceType}` : 'Using operating system detection');
+                })
                 .catch((err: unknown) => setStatus(err instanceof Error ? err.message : 'Could not save the device type'))
                 .finally(() => setSaving(false));
             }}
