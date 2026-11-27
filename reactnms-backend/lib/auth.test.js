@@ -7,13 +7,27 @@ import { codeChallenge, createAuthStore, publicAuth, ssoName, verifyIdToken, ver
 test('public auth and local sessions do not reveal secrets', () => {
   const view = publicAuth({
     mode: 'ldap',
-    ldap: { url: 'ldaps://ldap.example', bindPasswordEnc: 'cipher-text' },
+    ad: {
+      url: 'ldaps://ad.example',
+      bindDn: 'cn=svc,dc=example,dc=com',
+      bindPasswordEnc: 'ad-cipher',
+      baseDn: 'dc=example,dc=com',
+      groupDn: 'cn=nms,dc=example,dc=com',
+      domain: 'example.com',
+    },
+    ldap: { url: 'ldaps://ldap.example', bindPasswordEnc: 'cipher-text', groupDn: 'cn=ldap,dc=example,dc=com' },
     sso: { issuer: 'https://idp.example', clientSecretEnc: 'client-cipher' },
   });
   const json = JSON.stringify(view);
   assert.equal(json.includes('cipher-text'), false);
+  assert.equal(json.includes('ad-cipher'), false);
   assert.equal(json.includes('client-cipher'), false);
+  assert.equal(json.includes('bindPasswordEnc'), false);
+  assert.equal(json.includes('example.com'), false);
+  assert.equal(view.ad.passwordSet, true);
+  assert.equal(view.ad.groupDn, 'cn=nms,dc=example,dc=com');
   assert.equal(view.ldap.passwordSet, true);
+  assert.equal(view.ldap.groupDn, 'cn=ldap,dc=example,dc=com');
   assert.equal(view.sso.secretSet, true);
   assert.equal(view.mode, 'ldap');
 

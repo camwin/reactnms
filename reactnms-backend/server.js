@@ -124,7 +124,7 @@ let discoveryConfig = {
   backupSchedule: { enabled: false, cron: '0 2 * * *', lastRun: null, lastError: '' },
   syslog: { enabled: false, port: 5514, retainDays: 14, maxRows: 100000 },
   deviceCli: {},
-  auth: { mode: 'off', ad: { url: '', domain: '' }, ldap: { url: '', baseDn: '', userFilter: '(uid={{username}})', bindDn: '', bindPasswordEnc: '' }, sso: { issuer: '', clientId: '', clientSecretEnc: '', redirectUri: '' } },
+  auth: { mode: 'off', ad: { url: '', bindDn: '', bindPasswordEnc: '', baseDn: '', groupDn: '', userFilter: '(|(sAMAccountName={{username}})(userPrincipalName={{username}}))' }, ldap: { url: '', bindDn: '', bindPasswordEnc: '', baseDn: '', groupDn: '', userFilter: '(uid={{username}})' }, sso: { issuer: '', clientId: '', clientSecretEnc: '', redirectUri: '' } },
   lastRun: null,
   results: [],
 };
@@ -2527,21 +2527,22 @@ app.post('/api/auth/login', async (req, res) => {
     return res.json({ ok: true, username: session.username, mode });
   }
   const cfg = normalizeAuth(discoveryConfig.auth);
+  const dir = mode === 'ad' ? cfg.ad : cfg.ldap;
   let bindPassword = '';
   try {
-    if (mode === 'ldap' && cfg.ldap.bindPasswordEnc) bindPassword = decryptSecret(secretKey, cfg.ldap.bindPasswordEnc);
+    if (dir.bindPasswordEnc) bindPassword = decryptSecret(secretKey, dir.bindPasswordEnc);
   } catch {
     return res.status(500).json({ error: 'The directory bind password could not be read' });
   }
   const result = await authenticateDirectory({
-    url: mode === 'ad' ? cfg.ad.url : cfg.ldap.url,
+    url: dir.url,
     username,
     password,
     mode,
-    domain: cfg.ad.domain,
-    baseDn: cfg.ldap.baseDn,
-    userFilter: cfg.ldap.userFilter,
-    bindDn: cfg.ldap.bindDn,
+    baseDn: dir.baseDn,
+    groupDn: dir.groupDn,
+    userFilter: dir.userFilter,
+    bindDn: dir.bindDn,
     bindPassword,
   });
   if (!result.ok) return res.status(401).json({ error: result.error || 'Directory login was rejected' });
@@ -2649,22 +2650,13 @@ app.post('/api/settings/auth', (req, res) => {
   if (mode === 'local' && authStore.listUsers().length === 0) {
     return res.status(400).json({ error: 'Create a local user first' });
   }
-  let bindPasswordEnc = current.ldap.bindPasswordEnc;
-  if (body.ldap?.clearPassword) bindPasswordEnc = '';
-  else if (typeof body.ldap?.bindPassword === 'string' && body.ldap.bindPassword) bindPasswordEnc = encryptSecret(secretKey, body.ldap.bindPassword);
   let clientSecretEnc = current.sso.clientSecretEnc;
   if (body.sso?.clearSecret) clientSecretEnc = '';
   else if (typeof body.sso?.clientSecret === 'string' && body.sso.clientSecret) clientSecretEnc = encryptSecret(secretKey, body.sso.clientSecret);
-  discoveryConfig.auth = normalizeAuth({
+  const next = normalizeAuth({
     mode,
-    ad: { url: body.ad?.url ?? current.ad.url, domain: body.ad?.domain ?? current.ad.domain },
-    ldap: {
-      url: body.ldap?.url ?? current.ldap.url,
-      baseDn: body.ldap?.baseDn ?? current.ldap.baseDn,
-      userFilter: body.ldap?.userFilter ?? current.ldap.userFilter,
-      bindDn: body.ldap?.bindDn ?? current.ldap.bindDn,
-      bindPasswordEnc,
-    },
+    ad: directoryFromBody(body.ad, current.ad),
+    ldap: directoryFromBody(body.ldap, current.ldap),
     sso: {
       issuer: body.sso?.issuer ?? current.sso.issuer,
       clientId: body.sso?.clientId ?? current.sso.clientId,
@@ -2672,9 +2664,30 @@ app.post('/api/settings/auth', (req, res) => {
       clientSecretEnc,
     },
   });
+  if (mode === 'ad' || mode === 'ldap') {
+    const dir = mode === 'ad' ? next.ad : next.ldap;
+    if (!dir.url || !dir.bindDn || !dir.bindPasswordEnc || !dir.baseDn || !dir.groupDn) {
+      return res.status(400).json({ error: 'Active Directory and LDAP need a server, bind account, search base DN, and required group DN' });
+    }
+  }
+  discoveryConfig.auth = next;
   saveConfig();
   res.json(publicAuth(discoveryConfig.auth));
 });
+
+function directoryFromBody(bodyDir, currentDir) {
+  let bindPasswordEnc = currentDir.bindPasswordEnc || '';
+  if (bodyDir?.clearPassword) bindPasswordEnc = '';
+  else if (typeof bodyDir?.bindPassword === 'string' && bodyDir.bindPassword) bindPasswordEnc = encryptSecret(secretKey, bodyDir.bindPassword);
+  return {
+    url: bodyDir?.url ?? currentDir.url,
+    bindDn: bodyDir?.bindDn ?? currentDir.bindDn,
+    baseDn: bodyDir?.baseDn ?? currentDir.baseDn,
+    groupDn: bodyDir?.groupDn ?? currentDir.groupDn,
+    userFilter: bodyDir?.userFilter ?? currentDir.userFilter,
+    bindPasswordEnc,
+  };
+}
 
 const CATALOG_STALE_MS = 6 * 3600 * 1000;
 let catalogSampling = false;

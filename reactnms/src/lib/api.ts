@@ -169,10 +169,19 @@ export type SyslogConfig = {
   status?: string;
 };
 
+export type DirectoryAuth = {
+  url: string;
+  bindDn: string;
+  baseDn: string;
+  groupDn: string;
+  userFilter: string;
+  passwordSet: boolean;
+};
+
 export type AuthPublic = {
   mode: 'off' | 'local' | 'ad' | 'ldap' | 'sso' | string;
-  ad: { url: string; domain: string };
-  ldap: { url: string; baseDn: string; userFilter: string; bindDn: string; passwordSet: boolean };
+  ad: DirectoryAuth;
+  ldap: DirectoryAuth;
   sso: { issuer: string; clientId: string; redirectUri: string; secretSet: boolean };
 };
 
@@ -702,8 +711,8 @@ export function deleteAuthUser(username: string) {
 
 export function saveAuthSettings(body: {
   mode: string;
-  ad?: { url: string; domain: string };
-  ldap?: { url: string; baseDn: string; userFilter: string; bindDn: string; bindPassword?: string; clearPassword?: boolean };
+  ad?: { url: string; bindDn: string; baseDn: string; groupDn: string; userFilter: string; bindPassword?: string };
+  ldap?: { url: string; bindDn: string; baseDn: string; groupDn: string; userFilter: string; bindPassword?: string };
   sso?: { issuer: string; clientId: string; redirectUri: string; clientSecret?: string; clearSecret?: boolean };
 }) {
   return request<AuthPublic>('/api/settings/auth', jsonInit('POST', body));

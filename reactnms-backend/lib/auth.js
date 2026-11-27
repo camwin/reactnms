@@ -1,29 +1,45 @@
 import crypto from 'node:crypto';
 
+export const AD_USER_FILTER = '(|(sAMAccountName={{username}})(userPrincipalName={{username}}))';
+export const LDAP_USER_FILTER = '(uid={{username}})';
+
 export const DEFAULT_AUTH = {
   mode: 'off',
-  ad: { url: '', domain: '' },
-  ldap: { url: '', baseDn: '', userFilter: '(uid={{username}})', bindDn: '', bindPasswordEnc: '' },
+  ad: { url: '', bindDn: '', bindPasswordEnc: '', baseDn: '', groupDn: '', userFilter: AD_USER_FILTER },
+  ldap: { url: '', bindDn: '', bindPasswordEnc: '', baseDn: '', groupDn: '', userFilter: LDAP_USER_FILTER },
   sso: { issuer: '', clientId: '', clientSecretEnc: '', redirectUri: '' },
 };
 
 const MODES = new Set(['off', 'local', 'ad', 'ldap', 'sso']);
 
+function directoryConfig(src, userFilter) {
+  return {
+    url: String(src?.url || '').trim(),
+    bindDn: String(src?.bindDn || '').trim(),
+    bindPasswordEnc: String(src?.bindPasswordEnc || ''),
+    baseDn: String(src?.baseDn || '').trim(),
+    groupDn: String(src?.groupDn || '').trim(),
+    userFilter: String(src?.userFilter || userFilter).trim() || userFilter,
+  };
+}
+
+function publicDirectory(dir) {
+  return {
+    url: dir.url,
+    bindDn: dir.bindDn,
+    baseDn: dir.baseDn,
+    groupDn: dir.groupDn,
+    userFilter: dir.userFilter,
+    passwordSet: !!dir.bindPasswordEnc,
+  };
+}
+
 export function normalizeAuth(raw) {
   const src = raw || {};
   return {
     mode: MODES.has(src.mode) ? src.mode : 'off',
-    ad: {
-      url: String(src.ad?.url || '').trim(),
-      domain: String(src.ad?.domain || '').trim(),
-    },
-    ldap: {
-      url: String(src.ldap?.url || '').trim(),
-      baseDn: String(src.ldap?.baseDn || '').trim(),
-      userFilter: String(src.ldap?.userFilter || '(uid={{username}})').trim() || '(uid={{username}})',
-      bindDn: String(src.ldap?.bindDn || '').trim(),
-      bindPasswordEnc: String(src.ldap?.bindPasswordEnc || ''),
-    },
+    ad: directoryConfig(src.ad, AD_USER_FILTER),
+    ldap: directoryConfig(src.ldap, LDAP_USER_FILTER),
     sso: {
       issuer: String(src.sso?.issuer || '').trim().replace(/\/$/, ''),
       clientId: String(src.sso?.clientId || '').trim(),
@@ -37,14 +53,8 @@ export function publicAuth(auth) {
   const cfg = normalizeAuth(auth);
   return {
     mode: cfg.mode,
-    ad: { ...cfg.ad },
-    ldap: {
-      url: cfg.ldap.url,
-      baseDn: cfg.ldap.baseDn,
-      userFilter: cfg.ldap.userFilter,
-      bindDn: cfg.ldap.bindDn,
-      passwordSet: !!cfg.ldap.bindPasswordEnc,
-    },
+    ad: publicDirectory(cfg.ad),
+    ldap: publicDirectory(cfg.ldap),
     sso: {
       issuer: cfg.sso.issuer,
       clientId: cfg.sso.clientId,

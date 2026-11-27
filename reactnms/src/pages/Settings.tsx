@@ -457,15 +457,78 @@ const AUTH_MODES = [
   { value: 'sso', label: 'SSO' },
 ];
 
+const AD_FILTER = '(|(sAMAccountName={{username}})(userPrincipalName={{username}}))';
+const LDAP_FILTER = '(uid={{username}})';
+
+function DirectoryFields({
+  idPrefix,
+  serverLabel,
+  url,
+  setUrl,
+  bindUser,
+  setBindUser,
+  bindPassword,
+  setBindPassword,
+  passwordSet,
+  baseDn,
+  setBaseDn,
+  groupDn,
+  setGroupDn,
+  userFilter,
+  setUserFilter,
+  filterHelp,
+}: {
+  idPrefix: string;
+  serverLabel: string;
+  url: string;
+  setUrl: (value: string) => void;
+  bindUser: string;
+  setBindUser: (value: string) => void;
+  bindPassword: string;
+  setBindPassword: (value: string) => void;
+  passwordSet: boolean;
+  baseDn: string;
+  setBaseDn: (value: string) => void;
+  groupDn: string;
+  setGroupDn: (value: string) => void;
+  userFilter: string;
+  setUserFilter: (value: string) => void;
+  filterHelp: string;
+}) {
+  return (
+    <>
+      <Label htmlFor={`${idPrefix}-url`}>{serverLabel}</Label>
+      <Input id={`${idPrefix}-url`} aria-label={`${serverLabel} URL`} placeholder="ldaps://directory.example.com" value={url} onChange={(event) => setUrl(event.target.value)} />
+      <Label htmlFor={`${idPrefix}-bind`}>Bind user</Label>
+      <Input id={`${idPrefix}-bind`} aria-label={`${serverLabel} bind user`} placeholder="CN=svc-nms,OU=Service,DC=example,DC=com" value={bindUser} onChange={(event) => setBindUser(event.target.value)} />
+      <p className="text-xs text-muted">A DN or user@domain. This account only searches the directory. The password is encrypted and is not shown again.</p>
+      <Input aria-label={`${serverLabel} bind password`} type="password" placeholder={passwordSet ? 'Bind password saved' : 'Bind password'} value={bindPassword} onChange={(event) => setBindPassword(event.target.value)} />
+      <Label htmlFor={`${idPrefix}-base`}>Search base DN</Label>
+      <Input id={`${idPrefix}-base`} aria-label={`${serverLabel} search base DN`} placeholder="DC=example,DC=com" value={baseDn} onChange={(event) => setBaseDn(event.target.value)} />
+      <Label htmlFor={`${idPrefix}-group`}>Required group DN</Label>
+      <Input id={`${idPrefix}-group`} aria-label={`${serverLabel} required group DN`} placeholder="CN=ReactNMS,OU=Groups,DC=example,DC=com" value={groupDn} onChange={(event) => setGroupDn(event.target.value)} />
+      <p className="text-xs text-muted">Sign-in is allowed only when this group lists the account, or the account lists this group. Active Directory does not list a user's primary group here, so choose a group the account was added to.</p>
+      <Label htmlFor={`${idPrefix}-filter`}>User filter</Label>
+      <Input id={`${idPrefix}-filter`} aria-label={`${serverLabel} user filter`} value={userFilter} onChange={(event) => setUserFilter(event.target.value)} className="font-mono" />
+      <p className="text-xs text-muted">{filterHelp}</p>
+    </>
+  );
+}
+
 function AuthPanel({ auth, onAuth }: { auth: AuthPublic | null; onAuth: (value: AuthPublic) => void }) {
   const [mode, setMode] = useState(auth?.mode || 'off');
   const [adUrl, setAdUrl] = useState(auth?.ad.url || '');
-  const [adDomain, setAdDomain] = useState(auth?.ad.domain || '');
+  const [adBind, setAdBind] = useState(auth?.ad.bindDn || '');
+  const [adPassword, setAdPassword] = useState('');
+  const [adBase, setAdBase] = useState(auth?.ad.baseDn || '');
+  const [adGroup, setAdGroup] = useState(auth?.ad.groupDn || '');
+  const [adFilter, setAdFilter] = useState(auth?.ad.userFilter || AD_FILTER);
   const [ldapUrl, setLdapUrl] = useState(auth?.ldap.url || '');
-  const [baseDn, setBaseDn] = useState(auth?.ldap.baseDn || '');
-  const [userFilter, setUserFilter] = useState(auth?.ldap.userFilter || '(uid={{username}})');
-  const [bindDn, setBindDn] = useState(auth?.ldap.bindDn || '');
-  const [bindPassword, setBindPassword] = useState('');
+  const [ldapBind, setLdapBind] = useState(auth?.ldap.bindDn || '');
+  const [ldapPassword, setLdapPassword] = useState('');
+  const [ldapBase, setLdapBase] = useState(auth?.ldap.baseDn || '');
+  const [ldapGroup, setLdapGroup] = useState(auth?.ldap.groupDn || '');
+  const [ldapFilter, setLdapFilter] = useState(auth?.ldap.userFilter || LDAP_FILTER);
   const [issuer, setIssuer] = useState(auth?.sso.issuer || '');
   const [clientId, setClientId] = useState(auth?.sso.clientId || '');
   const [redirectUri, setRedirectUri] = useState(auth?.sso.redirectUri || '');
@@ -479,11 +542,15 @@ function AuthPanel({ auth, onAuth }: { auth: AuthPublic | null; onAuth: (value: 
     if (!auth) return;
     setMode(auth.mode || 'off');
     setAdUrl(auth.ad.url || '');
-    setAdDomain(auth.ad.domain || '');
+    setAdBind(auth.ad.bindDn || '');
+    setAdBase(auth.ad.baseDn || '');
+    setAdGroup(auth.ad.groupDn || '');
+    setAdFilter(auth.ad.userFilter || AD_FILTER);
     setLdapUrl(auth.ldap.url || '');
-    setBaseDn(auth.ldap.baseDn || '');
-    setUserFilter(auth.ldap.userFilter || '(uid={{username}})');
-    setBindDn(auth.ldap.bindDn || '');
+    setLdapBind(auth.ldap.bindDn || '');
+    setLdapBase(auth.ldap.baseDn || '');
+    setLdapGroup(auth.ldap.groupDn || '');
+    setLdapFilter(auth.ldap.userFilter || LDAP_FILTER);
     setIssuer(auth.sso.issuer || '');
     setClientId(auth.sso.clientId || '');
     setRedirectUri(auth.sso.redirectUri || '');
@@ -511,25 +578,44 @@ function AuthPanel({ auth, onAuth }: { auth: AuthPublic | null; onAuth: (value: 
         </p>
         <Select ariaLabel="Authentication mode" value={mode} onValueChange={setMode} options={AUTH_MODES} />
         {mode === 'ad' ? (
-          <>
-            <Label htmlFor="ad-url">Active Directory server</Label>
-            <Input id="ad-url" aria-label="Active Directory URL" placeholder="ldaps://dc.example.com" value={adUrl} onChange={(event) => setAdUrl(event.target.value)} />
-            <Label htmlFor="ad-domain">Domain</Label>
-            <Input id="ad-domain" aria-label="Active Directory domain" placeholder="example.com" value={adDomain} onChange={(event) => setAdDomain(event.target.value)} />
-          </>
+          <DirectoryFields
+            idPrefix="ad"
+            serverLabel="Active Directory server"
+            url={adUrl}
+            setUrl={setAdUrl}
+            bindUser={adBind}
+            setBindUser={setAdBind}
+            bindPassword={adPassword}
+            setBindPassword={setAdPassword}
+            passwordSet={!!auth?.ad.passwordSet}
+            baseDn={adBase}
+            setBaseDn={setAdBase}
+            groupDn={adGroup}
+            setGroupDn={setAdGroup}
+            userFilter={adFilter}
+            setUserFilter={setAdFilter}
+            filterHelp="Default matches the account name or user@domain. {{username}} is replaced with the name typed at sign-in."
+          />
         ) : null}
         {mode === 'ldap' ? (
-          <>
-            <Label htmlFor="ldap-url">LDAP server</Label>
-            <Input id="ldap-url" aria-label="LDAP URL" placeholder="ldaps://ldap.example.com" value={ldapUrl} onChange={(event) => setLdapUrl(event.target.value)} />
-            <Label htmlFor="ldap-base">Base DN</Label>
-            <Input id="ldap-base" aria-label="LDAP base DN" placeholder="ou=people,dc=example,dc=com" value={baseDn} onChange={(event) => setBaseDn(event.target.value)} />
-            <Label htmlFor="ldap-filter">User filter</Label>
-            <Input id="ldap-filter" aria-label="LDAP user filter" value={userFilter} onChange={(event) => setUserFilter(event.target.value)} className="font-mono" />
-            <Label htmlFor="ldap-bind">Service bind DN</Label>
-            <Input id="ldap-bind" aria-label="LDAP bind DN" placeholder="Optional. Blank uses an anonymous search." value={bindDn} onChange={(event) => setBindDn(event.target.value)} />
-            <Input aria-label="LDAP bind password" type="password" placeholder={auth?.ldap.passwordSet ? 'Bind password saved' : 'Bind password'} value={bindPassword} onChange={(event) => setBindPassword(event.target.value)} />
-          </>
+          <DirectoryFields
+            idPrefix="ldap"
+            serverLabel="LDAP server"
+            url={ldapUrl}
+            setUrl={setLdapUrl}
+            bindUser={ldapBind}
+            setBindUser={setLdapBind}
+            bindPassword={ldapPassword}
+            setBindPassword={setLdapPassword}
+            passwordSet={!!auth?.ldap.passwordSet}
+            baseDn={ldapBase}
+            setBaseDn={setLdapBase}
+            groupDn={ldapGroup}
+            setGroupDn={setLdapGroup}
+            userFilter={ldapFilter}
+            setUserFilter={setLdapFilter}
+            filterHelp="Default matches uid. {{username}} is replaced with the name typed at sign-in."
+          />
         ) : null}
         {mode === 'sso' ? (
           <>
@@ -550,13 +636,14 @@ function AuthPanel({ auth, onAuth }: { auth: AuthPublic | null; onAuth: (value: 
               setNote('Saving…');
               saveAuthSettings({
                 mode,
-                ad: { url: adUrl.trim(), domain: adDomain.trim() },
-                ldap: { url: ldapUrl.trim(), baseDn: baseDn.trim(), userFilter: userFilter.trim(), bindDn: bindDn.trim(), bindPassword },
+                ad: { url: adUrl.trim(), bindDn: adBind.trim(), baseDn: adBase.trim(), groupDn: adGroup.trim(), userFilter: adFilter.trim(), bindPassword: adPassword },
+                ldap: { url: ldapUrl.trim(), bindDn: ldapBind.trim(), baseDn: ldapBase.trim(), groupDn: ldapGroup.trim(), userFilter: ldapFilter.trim(), bindPassword: ldapPassword },
                 sso: { issuer: issuer.trim(), clientId: clientId.trim(), redirectUri: redirectUri.trim(), clientSecret },
               })
                 .then((saved) => {
                   onAuth(saved);
-                  setBindPassword('');
+                  setAdPassword('');
+                  setLdapPassword('');
                   setClientSecret('');
                   setNote('Saved');
                 })
